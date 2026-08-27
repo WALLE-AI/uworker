@@ -1,0 +1,13 @@
+[package]
+name = "agentrs-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: 技能清单解析、单调收窄合并与缓存落位"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "agentrs-subagents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: 函数式子 Agent —— 零工具、独立上下文、schema 化结果"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+agentrs-prompts = { path = "../agentrs-prompts" }
+agentrs-types = { workspace = true }
+agentrs-context = { path = "../agentrs-context" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+agentrs-provider = { path = "../agentrs-provider" }
+
+[lints]
+workspace = true

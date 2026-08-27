@@ -1,0 +1,17 @@
+[package]
+name = "agentrs-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: token 账本、预算裁剪、请求装配与缓存分段"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+agentrs-types = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

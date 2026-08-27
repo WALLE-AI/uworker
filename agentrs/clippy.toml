@@ -1,0 +1,12 @@
+# 边界判据的机器可执行部分（架构方案 §1.1）
+# 内核不得直接触碰 OS / 网络 / 磁盘 / 真实时钟。
+# 这些能力一律经 port 注入；违反者在 CI 直接失败。
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "时钟经 Clock port 注入（架构 §1.1）" },
+    { path = "std::time::Instant::now", reason = "时钟经 Clock port 注入（架构 §1.1）" },
+]
+disallowed-types = [
+    { path = "std::fs::File", reason = "内核不碰磁盘；经 ContentStore / SandboxExecutor port（架构 §1.1）" },
+    { path = "std::process::Command", reason = "内核无执行权；经 SandboxExecutor port（架构 §1.1、ADR 1）" },
+    { path = "std::net::TcpStream", reason = "内核不碰网络；经 ProviderPort（架构 §1.1）" },
+]

@@ -1,0 +1,15 @@
+[package]
+name = "agentrs-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: provider 无关的消息与内容块模型（部分自 aionrs 移植）"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

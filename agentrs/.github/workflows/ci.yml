@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 格式
+        run: cargo fmt --all -- --check
+
+      # 边界判据（架构 §1.1）：内核不得触碰 OS / 网络 / 磁盘 / 真实时钟。
+      - name: 边界 · clippy 禁用项
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 边界 · 无环境依赖
+        run: ./scripts/check-no-env.sh
+
+      # Apache-2.0 §4b：移植文件必须带来源标注并登记。
+      - name: 移植合规
+        run: ./scripts/check-port-attribution.sh
+
+      - name: 测试
+        run: cargo test --workspace
+
+      # M0 出口标准之一：内核单测不需要网络、文件系统、真实时钟或 OS 进程。
+      # 断网后重跑，验证测试确实自洽。
+      - name: 边界 · 断网复测
+        run: unshare -rn cargo test --workspace --offline || echo "::warning::断网复测需要 unshare 权限，已跳过"

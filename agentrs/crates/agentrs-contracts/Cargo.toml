@@ -1,0 +1,17 @@
+[package]
+name = "agentrs-contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS 的公共契约：ID、事件、Surface、内容引用、授权、端口 trait。不依赖任何业务 crate。"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

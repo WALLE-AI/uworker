@@ -1,0 +1,16 @@
+[package]
+name = "agentrs-observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: observability（骨架，按迭代计划逐阶段填充）"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

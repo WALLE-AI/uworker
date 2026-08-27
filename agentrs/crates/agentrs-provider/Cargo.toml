@@ -1,0 +1,23 @@
+[package]
+name = "agentrs-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: LLM seam —— ProviderPort、厂商适配、SSE 分帧、请求投影"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+agentrs-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

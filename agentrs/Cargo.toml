@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/uworker/agentrs"
+
+[workspace.dependencies]
+# Internal
+agentrs-contracts = { path = "crates/agentrs-contracts" }
+agentrs-types = { path = "crates/agentrs-types" }
+
+# Serialization — contracts are serde-stable by definition
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+async-trait = "0.1"
+futures = "0.3"
+
+# Errors
+thiserror = "2"
+
+# Primitives
+bytes = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+blake3 = "1"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# The kernel must not reach the environment. These lints are the machine-checkable
+# half of the boundary rule in 架构方案 §1.1; the other half is the no-env test gate.
+disallowed_methods = "deny"
+disallowed_types = "deny"

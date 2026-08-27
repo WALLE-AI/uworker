@@ -1,0 +1,27 @@
+[package]
+name = "agentrs-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: 轻量命令行驱动器。默认只读；真实执行需显式 --adapter dev"
+
+[[bin]]
+name = "agentrs"
+path = "src/main.rs"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+agentrs-types = { workspace = true }
+agentrs-runtime = { path = "../agentrs-runtime" }
+agentrs-provider = { path = "../agentrs-provider" }
+agentrs-dev-adapter = { path = "../agentrs-dev-adapter" }
+agentrs-testkit = { path = "../agentrs-testkit" }
+agentrs-context = { path = "../agentrs-context" }
+agentrs-observability = { path = "../agentrs-observability" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

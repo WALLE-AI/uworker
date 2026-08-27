@@ -1,0 +1,4 @@
+# 不锁定 channel：CI 用镜像统一版本，本地用已安装的默认工具链。
+# 锁定具体版本会让 rustup 在每次构建前尝试联网同步 channel。
+[toolchain]
+components = ["rustfmt", "clippy"]

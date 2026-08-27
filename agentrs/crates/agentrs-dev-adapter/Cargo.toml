@@ -1,0 +1,22 @@
+[package]
+name = "agentrs-dev-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AgentRS: 开发用参考 adapter —— 本地 JSONL 持久化、CAS、终端审批、受限文件执行器。不是产品运行时。"
+
+[dependencies]
+agentrs-contracts = { workspace = true }
+agentrs-types = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tempdir = "0.3"
+agentrs-testkit = { path = "../agentrs-testkit" }
+
+[lints]
+workspace = true
