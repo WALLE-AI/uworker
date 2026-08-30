@@ -176,10 +176,13 @@ fn 起一个() -> (Engine, Arc<FakePersistence>) {
     let persistence = Arc::new(FakePersistence::new());
     let deps = EngineDeps {
         persistence: persistence.clone() as Arc<dyn RunPersistence>,
+        event_sink: None,
         clock: Arc::new(FakeClock::new(0)),
         driver: Arc::new(静默驱动),
         admission: Arc::new(AdmitAll),
         tools: None,
+        context: None,
+        components: None,
     };
     let engine = Engine::new(
         "r-compact".into(),

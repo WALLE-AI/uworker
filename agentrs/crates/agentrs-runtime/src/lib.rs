@@ -23,6 +23,7 @@
 pub mod composition;
 pub mod engine;
 pub mod fork;
+pub mod generation;
 pub mod host;
 pub mod inbox;
 pub mod invariant;

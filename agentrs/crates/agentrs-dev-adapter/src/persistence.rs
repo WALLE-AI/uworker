@@ -36,9 +36,49 @@ impl JsonlPersistence {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let mut state = State::default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
+        for value in text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        {
+            match value.get("kind").and_then(|kind| kind.as_str()) {
+                Some("event") => {
+                    let Some(event) = value
+                        .get("event")
+                        .cloned()
+                        .and_then(|event| serde_json::from_value::<RunEventEnvelope>(event).ok())
+                    else {
+                        continue;
+                    };
+                    let Some(seq) = event.seq else {
+                        continue;
+                    };
+                    state.next_seq = state.next_seq.max(seq.0);
+                    state.epoch = Some(RunEpoch(
+                        state.epoch.map(|epoch| epoch.0).unwrap_or(0).max(event.epoch.0),
+                    ));
+                    state.by_id.insert(event.event_id, seq);
+                }
+                Some("checkpoint") => {
+                    if let Some(checkpoint) = value
+                        .get("checkpoint")
+                        .cloned()
+                        .and_then(|checkpoint| serde_json::from_value(checkpoint).ok())
+                    {
+                        state.checkpoint = Some(checkpoint);
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(Self {
             path,
-            state: Mutex::new(State::default()),
+            state: Mutex::new(state),
         })
     }
 
@@ -140,6 +180,11 @@ impl RunPersistence for JsonlPersistence {
         epoch: RunEpoch,
         event: RunEventEnvelope,
     ) -> Result<EventSequence, PersistError> {
+        if !event.is_durable() {
+            return Err(PersistError::Backend {
+                message: "non_durable_event".into(),
+            });
+        }
         let mut s = self.state.lock().unwrap();
         Self::guard(&mut s, epoch)?;
 
@@ -154,6 +199,7 @@ impl RunPersistence for JsonlPersistence {
         drop(s);
 
         let mut stored = event;
+        stored.epoch = epoch;
         stored.seq = Some(seq);
         self.append_line(&serde_json::json!({"kind":"event","event":stored}))?;
         Ok(seq)
@@ -249,5 +295,53 @@ mod tests {
             p.save_checkpoint(RunEpoch(1), ahead).await,
             Err(PersistError::CheckpointAhead)
         ));
+    }
+
+    #[tokio::test]
+    async fn live_事件拒绝进入_durable_jsonl() {
+        let dir = tempdir::TempDir::new("agentrs-jsonl-live").unwrap();
+        let p = JsonlPersistence::open(dir.path().join("events.jsonl")).unwrap();
+        let mut live = 事件("live-1");
+        live.durability = Durability::LiveStream;
+        live.payload = EventPayload::TextDelta { text: "delta".into() };
+
+        assert!(matches!(
+            p.append_event(RunEpoch(1), live).await,
+            Err(PersistError::Backend { message }) if message == "non_durable_event"
+        ));
+        assert_eq!(p.event_count(), 0);
+        assert!(
+            !p.path().exists() || std::fs::read_to_string(p.path()).unwrap().is_empty(),
+            "拒绝 live 事件不得创建任何日志内容"
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_恢复序号幂等索引与_epoch_围栏() {
+        let dir = tempdir::TempDir::new("agentrs-jsonl-reopen").unwrap();
+        let path = dir.path().join("events.jsonl");
+        let first = JsonlPersistence::open(&path).unwrap();
+        assert_eq!(
+            first.append_event(RunEpoch(3), 事件("old")).await.unwrap(),
+            EventSequence(1)
+        );
+        drop(first);
+
+        let reopened = JsonlPersistence::open(&path).unwrap();
+        assert_eq!(reopened.event_count(), 1);
+        assert_eq!(
+            reopened.append_event(RunEpoch(3), 事件("old")).await.unwrap(),
+            EventSequence(1),
+            "reopen 后重复 event_id 仍必须幂等"
+        );
+        assert!(matches!(
+            reopened.append_event(RunEpoch(2), 事件("stale")).await,
+            Err(PersistError::Fenced)
+        ));
+        assert_eq!(
+            reopened.append_event(RunEpoch(4), 事件("new")).await.unwrap(),
+            EventSequence(2),
+            "reopen 后序号必须从历史最大值继续"
+        );
     }
 }

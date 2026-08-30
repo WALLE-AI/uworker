@@ -94,14 +94,17 @@ pub enum SurfaceEventKind {
     AssistantMessage,
     /// 工具结果。
     ToolResult,
+    /// 经 ContentStore 解引用并持久化来源引用的上下文。
+    ContextAttached,
 }
 
 impl SurfaceEventKind {
     /// 全部变体，供投影器穷举。
-    pub const ALL: [SurfaceEventKind; 3] = [
+    pub const ALL: [SurfaceEventKind; 4] = [
         SurfaceEventKind::UserMessage,
         SurfaceEventKind::AssistantMessage,
         SurfaceEventKind::ToolResult,
+        SurfaceEventKind::ContextAttached,
     ];
 }
 
@@ -155,10 +158,10 @@ mod tests {
     }
 
     #[test]
-    fn surface_种类恰好三种() {
+    fn surface_种类恰好四种() {
         assert_eq!(
             SurfaceEventKind::ALL.len(),
-            3,
+            4,
             "新增种类必须同步更新投影规则与本断言"
         );
     }

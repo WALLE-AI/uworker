@@ -291,6 +291,7 @@ fn 游标落在不存在的序号上也能正确定位() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "seq 升序")]
 fn 乱序输入在_debug_下被断言拦住() {
     // 二分定位依赖有序。乱序输入会给出**错误结果而不是慢结果**——
@@ -347,8 +348,8 @@ fn ui_delta_丢失不影响已提交轨迹() {
                 request_id: "q1".into(),
             },
         ),
-        live(1, EventPayload::TextDelta),
-        live(2, EventPayload::TextDelta),
+        live(1, EventPayload::TextDelta { text: "a".into() }),
+        live(2, EventPayload::TextDelta { text: "b".into() }),
         事件(2, EventPayload::AssistantMessage),
     ];
     let 丢delta: Vec<_> = 有delta.iter().filter(|e| e.is_durable()).cloned().collect();
@@ -388,7 +389,7 @@ fn 带了序号的_live_事件仍被排除() {
 fn 分页只返回_durable_事件() {
     let evs = vec![
         事件(1, EventPayload::UsageUpdated),
-        live(1, EventPayload::TextDelta),
+        live(1, EventPayload::TextDelta { text: "x".into() }),
         事件(2, EventPayload::UsageUpdated),
     ];
     let p = page(&evs, Cursor::start(), 10, &EventFilter::default());

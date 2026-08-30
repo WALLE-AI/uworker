@@ -11,6 +11,7 @@ agentrs-contracts = { workspace = true }
 agentrs-prompts = { path = "../agentrs-prompts" }
 agentrs-types = { workspace = true }
 agentrs-context = { path = "../agentrs-context" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

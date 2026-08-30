@@ -10,13 +10,20 @@
 //! - ✅ [`functional`] 通用骨架
 //! - ✅ [`compact`] 压缩摘要（§9.3 第 3 段）
 //! - ✅ [`childrun`] ChildRun 派生规则（§11.1，内核不变量 5）
-//! - ⬜ Explore / Plan / memorySelector / ToolSearch / contextSummary
+//! - ✅ Explore / Plan / ToolSearch / contextSummary
+//! - ✅ memorySelector（由 `agentrs-memory` 实现）
 
 #![forbid(unsafe_code)]
 
 pub mod childrun;
 pub mod compact;
 pub mod functional;
+pub mod memberrun;
+pub mod structured;
 
 pub use childrun::{derive, ChildRequest, DeriveError, Parent};
 pub use functional::{build_request, collect, SubagentError, SubagentInput, SubagentOutput};
+pub use memberrun::{derive_member, MemberDeriveError, MemberParent, MemberRequest};
+pub use structured::{
+    parse_structured, parse_tool_search, to_summary, FunctionalKind, StructuredConclusion, ToolSearchDecision,
+};

@@ -12,9 +12,10 @@ agentrs-types = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
+tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 tempdir = "0.3"
 agentrs-testkit = { path = "../agentrs-testkit" }
 

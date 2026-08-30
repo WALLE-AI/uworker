@@ -36,11 +36,17 @@ impl OpenAiCompatProvider {
             client,
         })
     }
-}
 
-#[async_trait]
-impl ProviderPort for OpenAiCompatProvider {
-    async fn stream(&self, req: LlmRequest) -> Result<Vec<LlmEvent>, ProviderError> {
+    /// Streams parsed events to a callback while also returning the finalized
+    /// event sequence used by existing callers.
+    ///
+    /// Text and thinking deltas are emitted as their SSE frames arrive. Events
+    /// that require whole-response normalization (tool calls, usage and Done)
+    /// are emitted after finalization.
+    pub async fn stream_with<F>(&self, req: LlmRequest, mut emit: F) -> Result<Vec<LlmEvent>, ProviderError>
+    where
+        F: FnMut(LlmEvent) + Send,
+    {
         let body = openai::project_request(&req, true);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
@@ -52,7 +58,6 @@ impl ProviderPort for OpenAiCompatProvider {
         let resp = builder.send().await.map_err(|_| ProviderError::Unreachable)?;
         let status = resp.status();
         if !status.is_success() {
-            // 只按状态码分类，不读响应正文——它可能含密钥回显或用户内容。
             return Err(match status.as_u16() {
                 401 | 403 => ProviderError::Unauthorized,
                 429 => ProviderError::RateLimited,
@@ -72,9 +77,10 @@ impl ProviderPort for OpenAiCompatProvider {
             let text = String::from_utf8_lossy(&bytes);
             for frame in decoder.push(&text) {
                 match frame {
-                    SseFrame::Done => return Ok(openai::finalize(events)),
+                    SseFrame::Done => return Ok(finish_stream(events, &mut emit)),
                     SseFrame::Data(payload) => {
                         let parsed = openai::parse_chunk(&payload).map_err(|_| ProviderError::Malformed)?;
+                        emit_live(&parsed, &mut emit);
                         events.extend(parsed);
                     }
                 }
@@ -84,11 +90,37 @@ impl ProviderPort for OpenAiCompatProvider {
         for frame in decoder.finish() {
             if let SseFrame::Data(payload) = frame {
                 let parsed = openai::parse_chunk(&payload).map_err(|_| ProviderError::Malformed)?;
+                emit_live(&parsed, &mut emit);
                 events.extend(parsed);
             }
         }
 
-        Ok(openai::finalize(events))
+        Ok(finish_stream(events, &mut emit))
+    }
+}
+
+fn emit_live(events: &[LlmEvent], emit: &mut impl FnMut(LlmEvent)) {
+    for event in events {
+        if matches!(event, LlmEvent::TextDelta(_) | LlmEvent::ThinkingDelta(_)) {
+            emit(event.clone());
+        }
+    }
+}
+
+fn finish_stream(events: Vec<LlmEvent>, emit: &mut impl FnMut(LlmEvent)) -> Vec<LlmEvent> {
+    let events = openai::finalize(events);
+    for event in &events {
+        if !matches!(event, LlmEvent::TextDelta(_) | LlmEvent::ThinkingDelta(_)) {
+            emit(event.clone());
+        }
+    }
+    events
+}
+
+#[async_trait]
+impl ProviderPort for OpenAiCompatProvider {
+    async fn stream(&self, req: LlmRequest) -> Result<Vec<LlmEvent>, ProviderError> {
+        self.stream_with(req, |_| {}).await
     }
 }
 

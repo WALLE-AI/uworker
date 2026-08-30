@@ -226,6 +226,7 @@ async fn execute_call_inner(
     let execution_id = ExecutionId::new(format!("{}-{}", ctx.step_id, call.call_id));
 
     let proposal = ToolProposal {
+        step_id: ctx.step_id.clone(),
         call_id: call.call_id.clone(),
         tool_name: call.tool_name.clone(),
         arguments: call.arguments.clone(),
@@ -627,6 +628,7 @@ mod tests {
         policy.script(PolicyDecision::RequireApproval(ApprovalRequest {
             step_id: "s1".into(),
             proposal: ToolProposal {
+                step_id: "s1".into(),
                 call_id: "c1".into(),
                 tool_name: "Write".into(),
                 arguments: serde_json::json!({}),
@@ -674,6 +676,7 @@ mod tests {
         policy.script(PolicyDecision::RequireApproval(ApprovalRequest {
             step_id: "s1".into(),
             proposal: ToolProposal {
+                step_id: "s1".into(),
                 call_id: "c1".into(),
                 tool_name: "Write".into(),
                 arguments: serde_json::json!({}),
@@ -713,6 +716,7 @@ mod tests {
         policy.script(PolicyDecision::RequireApproval(ApprovalRequest {
             step_id: "s1".into(),
             proposal: ToolProposal {
+                step_id: "s1".into(),
                 call_id: "c1".into(),
                 tool_name: "Write".into(),
                 arguments: serde_json::json!({}),
@@ -1075,6 +1079,7 @@ mod tightening_tests {
         policy.script(PolicyDecision::RequireApproval(ApprovalRequest {
             step_id: "s1".into(),
             proposal: ToolProposal {
+                step_id: "s1".into(),
                 call_id: "c1".into(),
                 tool_name: "Write".into(),
                 arguments: serde_json::json!({}),

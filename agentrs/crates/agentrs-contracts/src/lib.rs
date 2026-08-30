@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod authority;
+pub mod component;
 pub mod content;
 pub mod event;
 pub mod external;

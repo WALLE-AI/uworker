@@ -145,6 +145,11 @@ pub enum EventPayload {
         /// 与 `ModelRequestManifest` 一一对应。
         request_id: RequestId,
     },
+    /// 请求构成已经完整记录。必须先于 [`Self::ModelRequestPrepared`] 持久化。
+    ModelRequestManifestRecorded {
+        /// 可离线重建同一请求的清单。
+        manifest: Box<crate::manifest::ModelRequestManifest>,
+    },
     /// **已开始产出可见输出**。
     ///
     /// `TextDelta` 是 live 的、可丢失的，因此"崩溃前有没有给用户看到过东西"
@@ -156,8 +161,19 @@ pub enum EventPayload {
     PartialOutputStarted,
     /// 助手消息已提交。
     AssistantMessage,
+    /// 一条可离线重建的 Surface 消息。
+    ///
+    /// 其 append/replace 语义与种类由事件信封的 `surface` marker 携带。
+    SurfaceMessageRecorded {
+        /// 模型可见消息本体的结构化表示。
+        message: serde_json::Value,
+    },
     /// 文本增量（live，可丢）。
-    TextDelta,
+    TextDelta {
+        /// 可直接展示的文本片段。旧版本 unit 事件反序列化为空片段。
+        #[serde(default)]
+        text: String,
+    },
     /// 思考增量（live，可丢）。
     ThinkingDelta,
     /// 用量更新。
@@ -214,6 +230,11 @@ pub enum EventPayload {
     // ---- 上下文 ----
     /// 上下文来源已选定。
     ContextSelected,
+    /// 成功解引用并进入模型上下文的内容引用。
+    ContextContentAttached {
+        /// 仅包含成功解析的引用；Forbidden / NotFound 不得进入。
+        refs: Vec<crate::content::ContentRef>,
+    },
     /// 内容引用解析失败，已降级。
     ContentRefUnresolved,
     /// 历史合法化已执行。
@@ -282,7 +303,10 @@ mod tests {
 
     #[test]
     fn live_事件不参与恢复() {
-        let e = 信封(Durability::LiveStream, EventPayload::TextDelta);
+        let e = 信封(
+            Durability::LiveStream,
+            EventPayload::TextDelta { text: "x".into() },
+        );
         assert!(!e.is_durable());
     }
 
@@ -311,5 +335,11 @@ mod tests {
         let mut b = a.clone();
         b.seq = Some(EventSequence(99)); // 重试导致存储侧分配了新序号
         assert_eq!(a.event_id, b.event_id, "去重必须靠 event_id，否则重试会写入两条");
+    }
+
+    #[test]
+    fn 旧版无正文_text_delta_仍可读取() {
+        let payload: EventPayload = serde_json::from_str(r#"{"type":"text_delta"}"#).unwrap();
+        assert_eq!(payload, EventPayload::TextDelta { text: String::new() });
     }
 }

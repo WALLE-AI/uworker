@@ -22,9 +22,7 @@ use agentrs_types::Message;
 
 /// 一个 Surface 节点：durable 事件 + 它派生出的消息。
 ///
-/// 消息由事件载荷承载。契约层的 `EventPayload` 目前是无字段判别式，
-/// 因此这一层用 [`SurfaceNode`] 把"事件"与"它的消息"配对，
-/// 由调用方（事件写入侧）保证配对正确。W2 之后随事件载荷细化收敛为单一来源。
+/// 消息由 `SurfaceMessageRecorded` 事件载荷承载。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceNode {
     /// durable 序号。
@@ -36,6 +34,22 @@ pub struct SurfaceNode {
     /// 该节点承载的消息。空 content 的 assistant 消息在此仍为 `Some`——
     /// 它不进入派生历史，但事件必须保留（承载 usage / max_tokens）。
     pub message: Message,
+}
+
+/// Rebuild Surface nodes from a durable event prefix.
+pub fn from_events(events: &[RunEventEnvelope]) -> Result<Vec<SurfaceNode>, serde_json::Error> {
+    events
+        .iter()
+        .filter(|event| event.is_durable())
+        .filter_map(|event| match &event.payload {
+            agentrs_contracts::event::EventPayload::SurfaceMessageRecorded { message } => Some(
+                serde_json::from_value(message.clone())
+                    .map(|message| SurfaceNode::from_event(event, message)),
+            ),
+            _ => None,
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|nodes| nodes.into_iter().flatten().collect())
 }
 
 impl SurfaceNode {

@@ -81,7 +81,11 @@ pub fn build_request(
     LlmRequest {
         request_id,
         model: input.model.clone(),
-        system: system.to_string(),
+        system: if input.task.trim().is_empty() {
+            system.to_string()
+        } else {
+            format!("{system}\n\n任务：{}", input.task)
+        },
         // **独立受限上下文**：只有调用方明确交出来的那部分。
         messages: input.context.clone(),
         // **零工具**。不是"我们不打算给"，是这里根本不填。
@@ -154,7 +158,7 @@ mod tests {
         // 独立受限上下文——父 Run 的其余历史不会漏进来。
         let r = build_request(&输入(), "q".into(), "sys");
         assert_eq!(r.messages.len(), 1);
-        assert_eq!(r.system, "sys");
+        assert_eq!(r.system, "sys\n\n任务：总结");
     }
 
     #[test]

@@ -73,6 +73,45 @@ pub const MEMORY_SELECTOR: Prompt = Prompt {
     inputs: &["limit"],
 };
 
+/// Explore 子 Agent 的严格 JSON 输出提示。
+pub const EXPLORE: Prompt = Prompt {
+    id: "explore_subagent_system",
+    version: 1,
+    template: "你是只读调查子 Agent。仅依据给定材料回答，不得假设自己调用过工具。\n\
+只输出 JSON，不要 Markdown：{{\"conclusion\":\"结论\",\"evidence\":[\"证据\"],\"risks\":[\"风险\"],\"confidence\":0,\"next_steps\":[\"下一步\"]}}。\n\
+evidence 必须非空，confidence 必须是 0 到 100。",
+    inputs: &[],
+};
+
+/// Plan 子 Agent 的严格 JSON 输出提示。
+pub const PLAN_SUBAGENT: Prompt = Prompt {
+    id: "plan_subagent_system",
+    version: 1,
+    template: "你是规划子 Agent。把给定目标拆成可验证的执行步骤，不得声称已经执行。\n\
+只输出 JSON，不要 Markdown：{{\"conclusion\":\"计划摘要\",\"evidence\":[],\"risks\":[\"风险\"],\"confidence\":0,\"next_steps\":[\"可验证步骤\"]}}。\n\
+next_steps 必须非空，confidence 必须是 0 到 100。",
+    inputs: &[],
+};
+
+/// ToolSearch 子 Agent 的严格 JSON 输出提示。
+pub const TOOL_SEARCH: Prompt = Prompt {
+    id: "tool_search_subagent_system",
+    version: 1,
+    template: "你是工具选择子 Agent。只能从调用方给出的候选工具名中选择，最多选择 {limit} 个。\n\
+只输出 JSON，不要 Markdown：{{\"selected\":[\"工具名\"],\"rationale\":\"理由\"}}。不确定时返回空 selected。",
+    inputs: &["limit"],
+};
+
+/// contextSummary 子 Agent 的严格 JSON 输出提示。
+pub const CONTEXT_SUMMARY: Prompt = Prompt {
+    id: "context_summary_subagent_system",
+    version: 1,
+    template: "你是上下文交接子 Agent。仅提炼给定材料中可证实的状态，不得补全未知信息。\n\
+只输出 JSON，不要 Markdown：{{\"conclusion\":\"当前状态\",\"evidence\":[\"事实\"],\"risks\":[\"未决风险\"],\"confidence\":0,\"next_steps\":[\"下一步\"]}}。\n\
+conclusion 必须非空，confidence 必须是 0 到 100。",
+    inputs: &[],
+};
+
 /// 把待压历史**包裹成一条明确的指令**，而不是原样当对话轮次传入。
 ///
 /// ## 这份提示是被真实模型逼出来的
@@ -126,6 +165,10 @@ pub fn all() -> Vec<Prompt> {
         COMPACT,
         COMPACT_INPUT_WRAPPER,
         MEMORY_SELECTOR,
+        EXPLORE,
+        PLAN_SUBAGENT,
+        TOOL_SEARCH,
+        CONTEXT_SUMMARY,
         TRUNCATED_TOOL_RESULT,
     ]
 }

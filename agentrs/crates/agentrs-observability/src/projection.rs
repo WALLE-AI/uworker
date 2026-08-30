@@ -26,8 +26,9 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 
+use agentrs_contracts::component::Generation;
 use agentrs_contracts::event::{EventPayload, RunEventEnvelope};
-use agentrs_contracts::ids::{EventSequence, StepId, TurnId};
+use agentrs_contracts::ids::{ComponentId, EventSequence, StepId, TurnId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -331,6 +332,10 @@ pub struct EventFilter {
     pub turn_id: Option<TurnId>,
     /// 只要这个 Step。
     pub step_id: Option<StepId>,
+    /// 只要 manifest 使用了这个组件。
+    pub component_id: Option<ComponentId>,
+    /// 与 `component_id` 联用，限定精确代际。
+    pub generation: Option<Generation>,
 }
 
 impl EventFilter {
@@ -347,6 +352,29 @@ impl EventFilter {
         }
         if let Some(s) = &self.step_id {
             if e.causality.step_id.as_ref() != Some(s) {
+                return false;
+            }
+        }
+        if self.component_id.is_some() || self.generation.is_some() {
+            let EventPayload::ModelRequestManifestRecorded { manifest } = &e.payload else {
+                return false;
+            };
+            let matches_generation = match (&self.component_id, self.generation) {
+                (Some(component), Some(generation)) => {
+                    manifest.operation_view.component_generations.get(component) == Some(&generation)
+                }
+                (Some(component), None) => manifest
+                    .operation_view
+                    .component_generations
+                    .contains_key(component),
+                (None, Some(generation)) => manifest
+                    .operation_view
+                    .component_generations
+                    .values()
+                    .any(|value| *value == generation),
+                (None, None) => true,
+            };
+            if !matches_generation {
                 return false;
             }
         }
@@ -452,9 +480,11 @@ pub fn payload_kind(p: &EventPayload) -> &'static str {
         EventPayload::UserInputSubmitted => "UserInputSubmitted",
         EventPayload::PermissionModeChanged => "PermissionModeChanged",
         EventPayload::ModelRequestPrepared { .. } => "ModelRequestPrepared",
+        EventPayload::ModelRequestManifestRecorded { .. } => "ModelRequestManifestRecorded",
         EventPayload::PartialOutputStarted => "PartialOutputStarted",
         EventPayload::AssistantMessage => "AssistantMessage",
-        EventPayload::TextDelta => "TextDelta",
+        EventPayload::SurfaceMessageRecorded { .. } => "SurfaceMessageRecorded",
+        EventPayload::TextDelta { .. } => "TextDelta",
         EventPayload::ThinkingDelta => "ThinkingDelta",
         EventPayload::UsageUpdated => "UsageUpdated",
         EventPayload::ToolProposed { .. } => "ToolProposed",
@@ -467,6 +497,7 @@ pub fn payload_kind(p: &EventPayload) -> &'static str {
         EventPayload::ChangeSetAvailable => "ChangeSetAvailable",
         EventPayload::ArtifactCreated => "ArtifactCreated",
         EventPayload::ContextSelected => "ContextSelected",
+        EventPayload::ContextContentAttached { .. } => "ContextContentAttached",
         EventPayload::ContentRefUnresolved => "ContentRefUnresolved",
         EventPayload::HistoryLegalized => "HistoryLegalized",
         EventPayload::CacheBreakObserved => "CacheBreakObserved",

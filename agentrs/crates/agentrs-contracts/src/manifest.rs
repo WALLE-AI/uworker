@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{CapabilityViewDigest, PermissionMode};
+use crate::component::Generation;
 use crate::content::{ContentRef, UnresolvedReason};
 use crate::ids::{AuthorityEnvelopeId, Digest, EventRange, MemoryId, RequestId, SkillId, ToolCallId};
 
@@ -16,9 +17,11 @@ pub struct OperationView {
     pub authority_id: AuthorityEnvelopeId,
     /// 权限模式。
     pub permission_mode: PermissionMode,
-    /// 能力视图摘要。**一次 operation 内不变**——这是 P0 的唯一依赖视图不变式。
+    /// 能力视图摘要。一次 operation 内不变。
     pub capability_digest: CapabilityViewDigest,
-    // P1 追加：provider / tool_catalog / middleware / prompt 各自的 Generation
+    /// 本 operation 固定的组件代际。重试期间不得改变。
+    #[serde(default)]
+    pub component_generations: std::collections::BTreeMap<crate::ids::ComponentId, Generation>,
 }
 
 /// 缓存分段索引。稳定前缀为 S0–S2，可变段为 S3–S4（架构 §9.1.1）。
@@ -60,6 +63,8 @@ pub enum CacheBreakCause {
     PermissionModeChanged,
     /// provider 切换（含授权内 fallback）。
     ProviderSwitched,
+    /// committed component generation 发生变化。
+    ComponentGenerationChanged,
     /// steering 注入。
     SteeringInjected,
     /// 服务端缓存过期。
@@ -177,6 +182,12 @@ pub struct ModelRequestManifest {
     /// 压缩摘要引用。
     #[serde(default)]
     pub compaction_refs: Vec<ContentRef>,
+    /// 本次请求实际成功解引用的全部内容。
+    ///
+    /// 该集合覆盖系统段、记忆、技能与压缩内容，供 checkpoint 统一 retain。
+    /// Forbidden 和 NotFound 引用不得进入这里。
+    #[serde(default)]
+    pub resolved_content_refs: Vec<ContentRef>,
     /// 工具目录摘要。
     pub tool_catalog_digest: Digest,
     /// 稳定前缀摘要（覆盖 S0–S2）。
@@ -197,6 +208,20 @@ pub struct ModelRequestManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p0_operation_view_缺少_generation_字段仍可读取() {
+        let current = OperationView {
+            authority_id: "a".into(),
+            permission_mode: PermissionMode::Default,
+            capability_digest: CapabilityViewDigest(Digest::from_hex("cap")),
+            component_generations: std::collections::BTreeMap::new(),
+        };
+        let mut old = serde_json::to_value(&current).unwrap();
+        old.as_object_mut().unwrap().remove("component_generations");
+        let decoded: OperationView = serde_json::from_value(old).unwrap();
+        assert!(decoded.component_generations.is_empty());
+    }
 
     #[test]
     fn 稳定前缀恰好是_s0_到_s2() {

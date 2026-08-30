@@ -37,6 +37,7 @@ pub mod compat;
 pub mod legalization;
 pub mod openai;
 pub mod openai_responses;
+pub mod routing;
 pub mod sse;
 pub mod transport;
 
@@ -83,4 +84,24 @@ pub enum ProviderError {
         /// 稳定错误码，非响应正文。
         code: String,
     },
+}
+
+impl ProviderError {
+    /// Whether another attempt on the same route may succeed.
+    pub fn retry_same_route(&self) -> bool {
+        matches!(self, Self::Unreachable | Self::RateLimited | Self::Other { .. })
+    }
+
+    /// Whether policy may move to the next pre-authorized route.
+    pub fn allows_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::Unreachable | Self::RateLimited | Self::Malformed | Self::Other { .. }
+        )
+    }
+
+    /// Errors handled by another layer or requiring operator action.
+    pub fn is_terminal_for_routing(&self) -> bool {
+        matches!(self, Self::ContextTooLong | Self::Unauthorized)
+    }
 }

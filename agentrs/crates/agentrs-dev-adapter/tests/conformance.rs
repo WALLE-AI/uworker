@@ -161,6 +161,7 @@ mod h5 {
 
         fn allowed_proposal(&self, tag: &str) -> ToolProposal {
             ToolProposal {
+                step_id: "s-conformance".into(),
                 call_id: tag.into(),
                 tool_name: "Write".into(),
                 arguments: serde_json::json!({"path": "a.txt", "content": "x"}),
@@ -184,6 +185,89 @@ mod h5 {
 
         let report = check_policy(&subject).await;
         assert!(report.passed(), "DevPolicy 不合格：\n{}", report.render());
+    }
+}
+
+/// InteractiveDevPolicy must satisfy the same H5 obligations while exercising
+/// its real human-decision channel and one-time approval token path.
+mod interactive_h5 {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use agentrs_contracts::ids::{Digest, Timestamp};
+    use agentrs_contracts::policy::{InputHash, ToolProposal};
+    use agentrs_contracts::ports::PolicyEnforcer;
+    use agentrs_dev_adapter::{ApprovalAnswer, InteractiveDevPolicy, LocalFileSandbox};
+    use agentrs_testkit::conformance::policy::{check_policy, PolicySubject};
+    use tokio::sync::mpsc;
+
+    struct InteractiveSubject {
+        policy: Arc<InteractiveDevPolicy>,
+        _dir: tempdir::TempDir,
+    }
+
+    impl PolicySubject for InteractiveSubject {
+        fn policy(&self) -> Arc<dyn PolicyEnforcer> {
+            self.policy.clone()
+        }
+
+        fn allowed_proposal(&self, tag: &str) -> ToolProposal {
+            proposal(tag, "Read")
+        }
+
+        fn approval_proposal(&self, tag: &str) -> Option<ToolProposal> {
+            Some(proposal(tag, "Write"))
+        }
+
+        fn now(&self) -> Timestamp {
+            Timestamp(0)
+        }
+    }
+
+    fn proposal(tag: &str, tool_name: &str) -> ToolProposal {
+        ToolProposal {
+            step_id: "s-interactive-conformance".into(),
+            call_id: tag.into(),
+            tool_name: tool_name.into(),
+            arguments: serde_json::json!({"path":"a.txt","content":"x"}),
+            workspace_id: "ws".into(),
+            change_set_id: "cs".into(),
+            input_hash: InputHash(Digest::from_hex(tag)),
+        }
+    }
+
+    #[tokio::test]
+    async fn interactive_policy_满足_h5() {
+        let dir = tempdir::TempDir::new("agentrs-interactive-h5").unwrap();
+        let sandbox = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let (requests, mut receiver) = mpsc::channel(32);
+        let policy = Arc::new(
+            InteractiveDevPolicy::new(
+                sandbox,
+                ["Read"],
+                ["Write"],
+                requests,
+                Timestamp(0),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
+        );
+        let responder = tokio::spawn(async move {
+            while let Some(prompt) = receiver.recv().await {
+                let _ = prompt.respond_to.send(ApprovalAnswer::AllowOnce {
+                    user_id: "conformance-human".into(),
+                });
+            }
+        });
+        let subject = InteractiveSubject { policy, _dir: dir };
+
+        let report = check_policy(&subject).await;
+        responder.abort();
+        assert!(
+            report.passed(),
+            "InteractiveDevPolicy does not satisfy H5:\n{}",
+            report.render()
+        );
     }
 }
 

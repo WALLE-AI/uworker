@@ -19,8 +19,10 @@ use std::sync::Arc;
 
 use agentrs_contracts::event::{Causality, Durability, EventPayload, RunEventEnvelope, Visibility};
 use agentrs_contracts::ids::{EventId, RunEpoch, RunId, StepId, Timestamp, TurnId};
-use agentrs_contracts::ports::{Clock, PersistError, RunPersistence};
-use agentrs_types::{LlmEvent, LlmRequest, StopReason};
+use agentrs_contracts::ports::{
+    Clock, ContentStore, MemoryFragment, PersistError, RunEventSink, RunPersistence, SkillManifest,
+};
+use agentrs_types::{LlmEvent, LlmRequest, StopReason, TokenUsage};
 
 use crate::composition::ResourceOwner;
 use crate::inbox::{Claim, Inbox, PreStepDecision};
@@ -83,6 +85,8 @@ pub struct RunSummary {
     pub steps: u32,
     /// 花了 0 个 Step 的 Turn 数——被拒绝的 claim 会产生它。
     pub zero_step_turns: u32,
+    /// Provider reported token usage accumulated across all model requests.
+    pub usage: TokenUsage,
     /// 最后一条助手文本。
     ///
     /// **从 Surface 投影而来，不是另存一份**——否则"模型可见即已记录"
@@ -133,6 +137,21 @@ impl CancelToken {
 pub trait StepDriver: Send + Sync {
     /// 执行一次模型请求。
     async fn call(&self, req: LlmRequest) -> Result<Vec<LlmEvent>, String>;
+
+    /// Delivers model events as they become available.
+    ///
+    /// Drivers without a genuinely streaming transport inherit a compatible
+    /// implementation that emits the collected result in order.
+    async fn call_stream(
+        &self,
+        req: LlmRequest,
+        emit: Arc<dyn Fn(LlmEvent) + Send + Sync>,
+    ) -> Result<(), String> {
+        for event in self.call(req).await? {
+            emit(event);
+        }
+        Ok(())
+    }
 }
 
 /// PreStep 裁决点。**返回值是权威的。**
@@ -154,6 +173,8 @@ impl StepAdmission for AdmitAll {
 pub struct EngineDeps {
     /// 事实记录。
     pub persistence: Arc<dyn RunPersistence>,
+    /// 可丢失的实时事件观察面，不参与事实提交。
+    pub event_sink: Option<Arc<dyn RunEventSink>>,
     /// 逻辑时钟。内核不读真实时钟。
     pub clock: Arc<dyn Clock>,
     /// 模型调用。
@@ -165,6 +186,41 @@ pub struct EngineDeps {
     /// `None` 表示**本 Run 无工具**——此时模型若仍提出调用，
     /// 会得到一条结构化拒绝而不是被静默忽略。
     pub tools: Option<Arc<crate::toolround::ToolRoundDeps>>,
+    /// Optional immutable content sources supplied by Core.
+    pub context: Option<ContextDeps>,
+    /// Optional Phase D component generation source.
+    pub components: Option<ComponentDeps>,
+}
+
+/// Components whose generations must be committed for each model operation.
+#[derive(Clone)]
+pub struct ComponentDeps {
+    /// Authoritative generation manager.
+    pub manager: Arc<crate::generation::GenerationManager>,
+    /// Root components used by this Run; dependencies are included recursively.
+    pub roots: Vec<agentrs_contracts::ids::ComponentId>,
+}
+
+/// Content inputs resolved before the first model request.
+#[derive(Clone, Default)]
+pub struct ContextSources {
+    /// Additional system sections.
+    pub system_sections: Vec<agentrs_contracts::content::ContentRef>,
+    /// Selected memory fragments.
+    pub memories: Vec<MemoryFragment>,
+    /// Enabled skill manifests.
+    pub skills: Vec<SkillManifest>,
+    /// Reusable compaction summaries.
+    pub compaction_refs: Vec<agentrs_contracts::content::ContentRef>,
+}
+
+/// ContentStore and its frozen per-run source selection.
+#[derive(Clone)]
+pub struct ContextDeps {
+    /// Host-owned content store.
+    pub store: Arc<dyn ContentStore>,
+    /// Sources selected by Core for this run.
+    pub sources: ContextSources,
 }
 
 impl EngineDeps {
@@ -177,10 +233,13 @@ impl EngineDeps {
     ) -> Self {
         Self {
             persistence,
+            event_sink: None,
             clock,
             driver,
             admission,
             tools: None,
+            context: None,
+            components: None,
         }
     }
 }
@@ -192,6 +251,28 @@ struct Progress {
     steps: u32,
     zero_step_turns: u32,
     empty_finals: u32,
+}
+
+#[derive(Default)]
+struct LlmResponseState {
+    text: String,
+    tool_calls: usize,
+    stop: Option<StopReason>,
+    partial_recorded: bool,
+    proposed: Vec<crate::toolround::ProposedCall>,
+    usage: TokenUsage,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreparedContext {
+    system: String,
+    messages: Vec<agentrs_types::Message>,
+    system_sections: Vec<agentrs_contracts::content::ContentRef>,
+    memory_fragments: Vec<agentrs_contracts::ids::MemoryId>,
+    skill_fragments: Vec<agentrs_contracts::ids::SkillId>,
+    compaction_refs: Vec<agentrs_contracts::content::ContentRef>,
+    resolved_content_refs: Vec<agentrs_contracts::content::ContentRef>,
+    unresolved: Vec<agentrs_contracts::content::UnresolvedReason>,
 }
 
 /// 单次 claim 的批量上限。
@@ -207,6 +288,8 @@ pub struct Engine {
     owner: Arc<ResourceOwner>,
     guards: TurnGuards,
     seq: std::sync::atomic::AtomicU64,
+    live_seq: std::sync::atomic::AtomicU64,
+    last_durable_seq: std::sync::atomic::AtomicU64,
     /// 已追加的 Surface 节点。请求**只从这里投影**，
     /// 这样"模型可见即已记录"才是可验证的（见 `invariant`）。
     surface: Mutex<Vec<crate::surface::SurfaceNode>>,
@@ -216,6 +299,12 @@ pub struct Engine {
     approval_timeout_ms: i64,
     model: agentrs_contracts::ids::ModelId,
     system_prompt: String,
+    authority_id: agentrs_contracts::ids::AuthorityEnvelopeId,
+    capability_digest: agentrs_contracts::authority::CapabilityViewDigest,
+    context_budget: agentrs_contracts::spec::ContextBudget,
+    spec_version: agentrs_contracts::version::SpecVersion,
+    prepared_context: Mutex<Option<PreparedContext>>,
+    usage: Mutex<TokenUsage>,
     /// 模型可见的工具目录。**只追加不重排**（缓存前缀 S1 段）。
     tool_catalog: Vec<agentrs_types::ToolDef>,
     required_isolation: agentrs_contracts::sandbox::IsolationLevel,
@@ -247,6 +336,8 @@ impl Engine {
             owner,
             guards,
             seq: std::sync::atomic::AtomicU64::new(0),
+            live_seq: std::sync::atomic::AtomicU64::new(0),
+            last_durable_seq: std::sync::atomic::AtomicU64::new(0),
             surface: Mutex::new(Vec::new()),
             invariants: crate::invariant::Invariants::default(),
             workspace_id: "default".into(),
@@ -254,6 +345,18 @@ impl Engine {
             approval_timeout_ms: 60_000,
             model: "default".into(),
             system_prompt: String::new(),
+            authority_id: "unset".into(),
+            capability_digest: agentrs_contracts::authority::CapabilityViewDigest(
+                agentrs_contracts::ids::Digest::from_hex("unset"),
+            ),
+            context_budget: agentrs_contracts::spec::ContextBudget {
+                max_input_tokens: 100_000,
+                reserved_output_tokens: 4_000,
+                compaction_threshold_pct: 80,
+            },
+            spec_version: agentrs_contracts::version::SpecVersion(1),
+            prepared_context: Mutex::new(None),
+            usage: Mutex::new(TokenUsage::default()),
             tool_catalog: Vec::new(),
             permission_mode: agentrs_contracts::authority::PermissionMode::Default,
             mode_guard: None,
@@ -270,6 +373,21 @@ impl Engine {
     ) -> Self {
         self.model = model.into();
         self.system_prompt = system_prompt.into();
+        self
+    }
+
+    /// 设置冻结的授权/能力视图和上下文预算，供每次请求 manifest 使用。
+    pub fn with_run_context(
+        mut self,
+        authority_id: agentrs_contracts::ids::AuthorityEnvelopeId,
+        capability_digest: agentrs_contracts::authority::CapabilityViewDigest,
+        context_budget: agentrs_contracts::spec::ContextBudget,
+        spec_version: agentrs_contracts::version::SpecVersion,
+    ) -> Self {
+        self.authority_id = authority_id;
+        self.capability_digest = capability_digest;
+        self.context_budget = context_budget;
+        self.spec_version = spec_version;
         self
     }
 
@@ -318,6 +436,17 @@ impl Engine {
         self
     }
 
+    /// Restore the durable Surface projection and sequence cursor.
+    pub fn with_recovery_state(
+        mut self,
+        surface: Vec<crate::surface::SurfaceNode>,
+        last_durable_seq: agentrs_contracts::ids::EventSequence,
+    ) -> Self {
+        self.surface = Mutex::new(surface);
+        self.last_durable_seq = std::sync::atomic::AtomicU64::new(last_durable_seq.0);
+        self
+    }
+
     fn next_event_id(&self) -> EventId {
         // 确定性派生：run_id + epoch + 本地计数。这是 durable 写入的幂等键，
         // 重投递必须命中同一条记录（架构 §4.3）。
@@ -331,7 +460,7 @@ impl Engine {
         durability: Durability,
         causality: Causality,
     ) -> Result<(), PersistError> {
-        let ev = RunEventEnvelope {
+        let mut ev = RunEventEnvelope {
             run_id: self.run_id.clone(),
             epoch: self.epoch,
             event_id: self.next_event_id(),
@@ -344,11 +473,20 @@ impl Engine {
             surface: None,
             payload,
         };
-        self.deps
-            .persistence
-            .append_event(self.epoch, ev)
-            .await
-            .map(|_| ())
+        if ev.is_durable() {
+            let seq = self.deps.persistence.append_event(self.epoch, ev.clone()).await?;
+            ev.seq = Some(seq);
+            self.last_durable_seq
+                .store(seq.0, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            ev.live_seq = Some(agentrs_contracts::ids::LiveSequence(
+                self.live_seq.fetch_add(1, Ordering::SeqCst) + 1,
+            ));
+        }
+        if let Some(sink) = &self.deps.event_sink {
+            let _ = sink.publish(ev).await;
+        }
+        Ok(())
     }
 
     async fn emit_fact(&self, payload: EventPayload, c: Causality) -> Result<(), PersistError> {
@@ -359,24 +497,140 @@ impl Engine {
     ///
     /// **这是模型可见内容进入系统的唯一入口**——请求装配只从 Surface 投影，
     /// 因此绕过这里的内容会被运行时不变式捕获。
-    async fn append_surface(
+    async fn record_surface(
         &self,
         kind: agentrs_contracts::surface::SurfaceEventKind,
+        op: agentrs_contracts::surface::SurfaceOp,
         message: agentrs_types::Message,
-    ) {
+        causality: Causality,
+    ) -> Result<(), PersistError> {
+        let mut event = RunEventEnvelope {
+            run_id: self.run_id.clone(),
+            epoch: self.epoch,
+            event_id: self.next_event_id(),
+            seq: None,
+            live_seq: None,
+            at: self.deps.clock.now(),
+            durability: Durability::DurableFact,
+            visibility: Visibility::User,
+            causality,
+            surface: Some(agentrs_contracts::surface::SurfaceMarker { kind, op }),
+            payload: EventPayload::SurfaceMessageRecorded {
+                message: serde_json::to_value(&message).expect("Message is serializable"),
+            },
+        };
+        let seq = self
+            .deps
+            .persistence
+            .append_event(self.epoch, event.clone())
+            .await?;
+        event.seq = Some(seq);
+        if let Some(sink) = &self.deps.event_sink {
+            let _ = sink.publish(event).await;
+        }
+        self.last_durable_seq
+            .store(seq.0, std::sync::atomic::Ordering::SeqCst);
         let mut s = self.surface.lock().await;
-        let seq = agentrs_contracts::ids::EventSequence(s.len() as u64 + 1);
         s.push(crate::surface::SurfaceNode {
             seq,
             kind,
-            op: agentrs_contracts::surface::SurfaceOp::Append,
+            op,
             message,
         });
+        Ok(())
     }
 
     /// 从 Surface 投影出即将发送的历史。
     async fn project_history(&self) -> Vec<agentrs_types::Message> {
         crate::surface::derive_messages(&self.surface.lock().await)
+    }
+
+    async fn resolve_context(&self) -> Result<PreparedContext, agentrs_context::AssembleError> {
+        let Some(context) = &self.deps.context else {
+            return Ok(PreparedContext {
+                system: self.system_prompt.clone(),
+                ..Default::default()
+            });
+        };
+        let mut prepared = PreparedContext {
+            system: self.system_prompt.clone(),
+            ..Default::default()
+        };
+
+        let system =
+            agentrs_context::resolve_text_refs(context.store.as_ref(), &context.sources.system_sections)
+                .await?;
+        if !system.texts.is_empty() {
+            if !prepared.system.is_empty() {
+                prepared.system.push_str("\n\n");
+            }
+            prepared.system.push_str(&system.texts.join("\n\n"));
+        }
+        prepared.system_sections = system.resolved_refs.clone();
+        prepared.resolved_content_refs.extend(system.resolved_refs);
+        prepared.unresolved.extend(system.unresolved);
+
+        for memory in &context.sources.memories {
+            let resolution = agentrs_context::resolve_text_refs(
+                context.store.as_ref(),
+                std::slice::from_ref(&memory.content),
+            )
+            .await?;
+            if !resolution.texts.is_empty() {
+                prepared.memory_fragments.push(memory.id.clone());
+            }
+            for text in resolution.texts {
+                prepared.messages.push(agentrs_types::Message::new(
+                    agentrs_types::Role::User,
+                    vec![agentrs_types::ContentBlock::text(format!(
+                        "[memory:{}]\n{text}",
+                        memory.id
+                    ))],
+                ));
+            }
+            prepared.resolved_content_refs.extend(resolution.resolved_refs);
+            prepared.unresolved.extend(resolution.unresolved);
+        }
+
+        for skill in &context.sources.skills {
+            let resolution = agentrs_context::resolve_text_refs(
+                context.store.as_ref(),
+                std::slice::from_ref(&skill.content),
+            )
+            .await?;
+            if !resolution.texts.is_empty() {
+                prepared.skill_fragments.push(skill.id.clone());
+            }
+            for text in resolution.texts {
+                prepared.messages.push(agentrs_types::Message::new(
+                    agentrs_types::Role::User,
+                    vec![agentrs_types::ContentBlock::text(format!(
+                        "[skill:{}@{}]\n{text}",
+                        skill.id, skill.version
+                    ))],
+                ));
+            }
+            prepared.resolved_content_refs.extend(resolution.resolved_refs);
+            prepared.unresolved.extend(resolution.unresolved);
+        }
+
+        for reference in &context.sources.compaction_refs {
+            let resolution =
+                agentrs_context::resolve_text_refs(context.store.as_ref(), std::slice::from_ref(reference))
+                    .await?;
+            for text in resolution.texts {
+                prepared.messages.push(agentrs_types::Message::new(
+                    agentrs_types::Role::User,
+                    vec![agentrs_types::ContentBlock::text(format!("[compaction]\n{text}"))],
+                ));
+            }
+            prepared
+                .compaction_refs
+                .extend(resolution.resolved_refs.iter().cloned());
+            prepared.resolved_content_refs.extend(resolution.resolved_refs);
+            prepared.unresolved.extend(resolution.unresolved);
+        }
+        Ok(prepared)
     }
 
     /// 驱动到终态。
@@ -506,8 +760,13 @@ impl Engine {
                         })],
                     ),
                 };
-                self.append_surface(agentrs_contracts::surface::SurfaceEventKind::UserMessage, msg)
-                    .await;
+                self.record_surface(
+                    agentrs_contracts::surface::SurfaceEventKind::UserMessage,
+                    agentrs_contracts::surface::SurfaceOp::Append,
+                    msg,
+                    step_c.clone(),
+                )
+                .await?;
             }
 
             let outcome = self.execute_step(&step_c).await?;
@@ -551,15 +810,98 @@ impl Engine {
     }
 
     async fn execute_step(&self, c: &Causality) -> Result<StepOutcome, PersistError> {
-        let request_id: agentrs_contracts::ids::RequestId = format!("{}-req", self.run_id).as_str().into();
-        self.emit_fact(
-            EventPayload::ModelRequestPrepared {
-                request_id: request_id.clone(),
-            },
-            c.clone(),
-        )
-        .await?;
+        let Some(components) = &self.deps.components else {
+            return self.execute_step_with_generations(c, Default::default()).await;
+        };
+        let scope = c
+            .operation_id
+            .as_ref()
+            .map(|id| format!("operation:{}", id.as_str()))
+            .or_else(|| {
+                c.step_id
+                    .as_ref()
+                    .map(|id| format!("operation:step:{}", id.as_str()))
+            })
+            .unwrap_or_else(|| "operation:unscoped".into());
+        let operation_owner = match self.owner.child(scope).await {
+            Ok(owner) => owner,
+            Err(_) => {
+                self.emit_fact(EventPayload::RunFailed, c.clone()).await?;
+                return Ok(StepOutcome::EmptyFinal);
+            }
+        };
+        let view = match components
+            .manager
+            .begin_operation(&components.roots, &operation_owner)
+            .await
+        {
+            Ok(view) => view,
+            Err(_) => {
+                operation_owner.shutdown().await;
+                self.emit_fact(EventPayload::RunFailed, c.clone()).await?;
+                return Ok(StepOutcome::EmptyFinal);
+            }
+        };
+        let result = self
+            .execute_step_with_generations(c, view.generations().clone())
+            .await;
+        operation_owner.shutdown().await;
+        result
+    }
 
+    async fn execute_step_with_generations(
+        &self,
+        c: &Causality,
+        component_generations: std::collections::BTreeMap<
+            agentrs_contracts::ids::ComponentId,
+            agentrs_contracts::component::Generation,
+        >,
+    ) -> Result<StepOutcome, PersistError> {
+        let request_id: agentrs_contracts::ids::RequestId = format!("{}-req", self.run_id).as_str().into();
+        let cached_context = { self.prepared_context.lock().await.clone() };
+        let prepared_context = match cached_context {
+            Some(prepared) => prepared,
+            None => {
+                let prepared = match self.resolve_context().await {
+                    Ok(prepared) => prepared,
+                    Err(_) => {
+                        self.emit_fact(EventPayload::RunFailed, c.clone()).await?;
+                        return Ok(StepOutcome::EmptyFinal);
+                    }
+                };
+                self.emit_fact(EventPayload::ContextSelected, c.clone()).await?;
+                if !prepared.resolved_content_refs.is_empty() {
+                    self.emit_fact(
+                        EventPayload::ContextContentAttached {
+                            refs: prepared.resolved_content_refs.clone(),
+                        },
+                        c.clone(),
+                    )
+                    .await?;
+                }
+                for _ in &prepared.unresolved {
+                    self.emit_fact(EventPayload::ContentRefUnresolved, c.clone())
+                        .await?;
+                }
+                let context_already_recorded =
+                    self.surface.lock().await.iter().any(|node| {
+                        node.kind == agentrs_contracts::surface::SurfaceEventKind::ContextAttached
+                    });
+                if !context_already_recorded {
+                    for message in &prepared.messages {
+                        self.record_surface(
+                            agentrs_contracts::surface::SurfaceEventKind::ContextAttached,
+                            agentrs_contracts::surface::SurfaceOp::Append,
+                            message.clone(),
+                            c.clone(),
+                        )
+                        .await?;
+                    }
+                }
+                *self.prepared_context.lock().await = Some(prepared.clone());
+                prepared
+            }
+        };
         // Surface 投影 → （预算裁剪）→ ★不变式断言★ → legalization → 发送。
         let history = self.project_history().await;
         {
@@ -574,7 +916,7 @@ impl Engine {
 
         // 缓存前缀：算出本次的稳定段摘要，与上一次比对并归因。
         // **归因必须在发请求之前做**——请求发出后前缀就变成"上一次"了。
-        let snapshot = self.cache_snapshot(&history).await;
+        let snapshot = self.cache_snapshot(&history, &component_generations).await;
         let cause = {
             let mut prev = self.prev_cache.lock().await;
             let c = agentrs_context::cache::attribute(prev.as_ref(), &snapshot);
@@ -588,59 +930,168 @@ impl Engine {
                 .await?;
         }
 
-        let req = LlmRequest {
-            request_id,
-            model: self.model.clone(),
-            system: self.system_prompt.clone(),
-            messages: history,
-            tools: self.tool_catalog.clone(),
-            max_tokens: None,
-            thinking: None,
-            reasoning_effort: None,
-            cache_prefix_digest: Some(snapshot.prefix_digest.clone()),
-        };
-
-        let events = match self.deps.driver.call(req).await {
-            Ok(e) => e,
+        let planned_messages = history
+            .iter()
+            .enumerate()
+            .map(|(index, message)| agentrs_context::PlannedMessage {
+                label: format!("surface-{index}"),
+                priority: if index + 1 == history.len() {
+                    agentrs_context::budget::Priority::CurrentInput
+                } else if index + 8 >= history.len() {
+                    agentrs_context::budget::Priority::RecentHistory
+                } else {
+                    agentrs_context::budget::Priority::OldHistory
+                },
+                message: message.clone(),
+            })
+            .collect();
+        let source_end = self
+            .last_durable_seq
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let plan = match agentrs_context::assemble(
+            agentrs_context::ContextPlanInput {
+                request_id: request_id.clone(),
+                model: self.model.clone(),
+                operation_view: agentrs_contracts::manifest::OperationView {
+                    authority_id: self.authority_id.clone(),
+                    permission_mode: self.permission_mode.clone(),
+                    capability_digest: self.capability_digest.clone(),
+                    component_generations,
+                },
+                source_event_range: agentrs_contracts::ids::EventRange {
+                    start: agentrs_contracts::ids::EventSequence(1),
+                    end: agentrs_contracts::ids::EventSequence(source_end),
+                },
+                system: prepared_context.system.clone(),
+                system_sections: prepared_context.system_sections.clone(),
+                messages: planned_messages,
+                tools: self.tool_catalog.clone(),
+                memory_fragments: prepared_context.memory_fragments.clone(),
+                skill_fragments: prepared_context.skill_fragments.clone(),
+                compaction_refs: prepared_context.compaction_refs.clone(),
+                resolved_content_refs: prepared_context.resolved_content_refs.clone(),
+                surface_digest: snapshot
+                    .stable
+                    .iter()
+                    .find(|segment| segment.kind == agentrs_contracts::manifest::CacheSegment::S2Surface)
+                    .map(|segment| segment.digest.clone())
+                    .unwrap_or_else(|| agentrs_contracts::ids::Digest::from_hex("surface-empty")),
+                surface_invalidation: snapshot.surface_invalidation,
+                legalization_ops: Vec::new(),
+                unresolved: prepared_context.unresolved.clone(),
+                max_input_tokens: self.context_budget.max_input_tokens,
+                reserved_output_tokens: self.context_budget.reserved_output_tokens,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(plan) => plan,
             Err(_) => {
                 self.emit_fact(EventPayload::RunFailed, c.clone()).await?;
                 return Ok(StepOutcome::EmptyFinal);
             }
         };
 
-        let mut text = String::new();
-        let mut tool_calls = 0usize;
-        let mut stop = None;
-        let mut partial_recorded = false;
-        let mut proposed: Vec<crate::toolround::ProposedCall> = Vec::new();
-
-        for e in &events {
-            match e {
-                LlmEvent::TextDelta(t) => {
-                    // 首个可见增量处写一条 durable 事实。
-                    // TextDelta 本身是 live 可丢的，恢复时无法据它判断
-                    // "崩溃前用户看到过东西没有"——那正是本事件存在的理由。
-                    if !partial_recorded && !t.is_empty() {
-                        partial_recorded = true;
-                        self.emit_fact(EventPayload::PartialOutputStarted, c.clone())
-                            .await?;
-                    }
-                    text.push_str(t);
-                    // live 事件：可采样或丢失，不参与恢复。
-                    self.emit(EventPayload::TextDelta, Durability::LiveStream, c.clone())
-                        .await?;
-                }
-                LlmEvent::ToolUse { id, name, input, .. } => {
-                    tool_calls += 1;
-                    proposed.push(crate::toolround::ProposedCall {
-                        call_id: id.clone(),
-                        tool_name: name.clone(),
-                        arguments: input.clone(),
-                    });
-                }
-                LlmEvent::Done { stop_reason, .. } => stop = Some(*stop_reason),
-                _ => {}
+        self.emit_fact(
+            EventPayload::ModelRequestManifestRecorded {
+                manifest: Box::new(plan.manifest.clone()),
+            },
+            c.clone(),
+        )
+        .await?;
+        let up_to_seq = agentrs_contracts::ids::EventSequence(
+            self.last_durable_seq.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        if let Some(context) = &self.deps.context {
+            let owner = agentrs_contracts::content::RetentionOwner::Checkpoint {
+                run_id: self.run_id.clone(),
+                up_to_seq,
+            };
+            if agentrs_context::retain_manifest_refs(context.store.as_ref(), owner, &plan.manifest)
+                .await
+                .is_err()
+            {
+                self.emit_fact(EventPayload::RunFailed, c.clone()).await?;
+                return Ok(StepOutcome::EmptyFinal);
             }
+        }
+        self.deps
+            .persistence
+            .save_checkpoint(
+                self.epoch,
+                agentrs_contracts::spec::RunCheckpoint {
+                    spec_version: self.spec_version,
+                    up_to_seq,
+                    pending_approval: None,
+                },
+            )
+            .await?;
+        self.emit_fact(EventPayload::Checkpointed, c.clone()).await?;
+        self.emit_fact(
+            EventPayload::ModelRequestPrepared {
+                request_id: request_id.clone(),
+            },
+            c.clone(),
+        )
+        .await?;
+
+        let req = LlmRequest {
+            request_id,
+            model: self.model.clone(),
+            system: plan.system,
+            messages: plan.messages,
+            tools: plan.tools,
+            max_tokens: Some(self.context_budget.reserved_output_tokens.min(u32::MAX as u64) as u32),
+            thinking: None,
+            reasoning_effort: None,
+            cache_prefix_digest: Some(plan.manifest.cache_prefix_digest),
+        };
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let emit: Arc<dyn Fn(LlmEvent) + Send + Sync> = Arc::new(move |event| {
+            let _ = event_tx.send(event);
+        });
+        let driver = self.deps.driver.clone();
+        let call = driver.call_stream(req, emit);
+        tokio::pin!(call);
+        let mut response = LlmResponseState::default();
+        let call_result = loop {
+            tokio::select! {
+                result = &mut call => break result,
+                Some(event) = event_rx.recv() => {
+                    self.consume_llm_event(event, &mut response, c).await?;
+                }
+            }
+        };
+        while let Ok(event) = event_rx.try_recv() {
+            self.consume_llm_event(event, &mut response, c).await?;
+        }
+        if call_result.is_err() {
+            self.emit_fact(EventPayload::RunFailed, c.clone()).await?;
+            return Ok(StepOutcome::EmptyFinal);
+        }
+
+        let LlmResponseState {
+            text,
+            tool_calls,
+            stop,
+            proposed,
+            usage: request_usage,
+            ..
+        } = response;
+
+        {
+            let mut total = self.usage.lock().await;
+            total.input_tokens = total.input_tokens.saturating_add(request_usage.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(request_usage.output_tokens);
+            total.cache_creation_tokens = total
+                .cache_creation_tokens
+                .saturating_add(request_usage.cache_creation_tokens);
+            total.cache_read_tokens = total
+                .cache_read_tokens
+                .saturating_add(request_usage.cache_read_tokens);
         }
 
         if !text.is_empty() || !proposed.is_empty() {
@@ -656,11 +1107,13 @@ impl Engine {
                     extra: None,
                 });
             }
-            self.append_surface(
+            self.record_surface(
                 agentrs_contracts::surface::SurfaceEventKind::AssistantMessage,
+                agentrs_contracts::surface::SurfaceOp::Append,
                 agentrs_types::Message::new(agentrs_types::Role::Assistant, blocks),
+                c.clone(),
             )
-            .await;
+            .await?;
         }
         self.emit_fact(EventPayload::AssistantMessage, c.clone()).await?;
 
@@ -675,6 +1128,48 @@ impl Engine {
             (_, _, true) => StepOutcome::EmptyFinal,
             _ => StepOutcome::Final { text },
         })
+    }
+
+    async fn consume_llm_event(
+        &self,
+        event: LlmEvent,
+        response: &mut LlmResponseState,
+        causality: &Causality,
+    ) -> Result<(), PersistError> {
+        match event {
+            LlmEvent::TextDelta(text) => {
+                // The durable marker is committed before the first live delta.
+                if !response.partial_recorded && !text.is_empty() {
+                    response.partial_recorded = true;
+                    self.emit_fact(EventPayload::PartialOutputStarted, causality.clone())
+                        .await?;
+                }
+                response.text.push_str(&text);
+                self.emit(
+                    EventPayload::TextDelta { text },
+                    Durability::LiveStream,
+                    causality.clone(),
+                )
+                .await?;
+            }
+            LlmEvent::ToolUse { id, name, input, .. } => {
+                response.tool_calls += 1;
+                response.proposed.push(crate::toolround::ProposedCall {
+                    call_id: id,
+                    tool_name: name,
+                    arguments: input,
+                });
+            }
+            LlmEvent::Usage(usage) => response.usage = usage,
+            LlmEvent::Done { stop_reason, usage } => {
+                response.stop = Some(stop_reason);
+                if usage.input_tokens > 0 || usage.output_tokens > 0 {
+                    response.usage = usage;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// 按调度计划执行工具调用（架构 §8.3）。
@@ -776,8 +1271,9 @@ impl Engine {
                             }
                             agentrs_contracts::StepOutcome::Canceled => ("已取消".into(), true),
                         };
-                        self.append_surface(
+                        self.record_surface(
                             agentrs_contracts::surface::SurfaceEventKind::ToolResult,
+                            agentrs_contracts::surface::SurfaceOp::Append,
                             agentrs_types::Message::new(
                                 agentrs_types::Role::User,
                                 vec![agentrs_types::ContentBlock::ToolResult {
@@ -786,8 +1282,9 @@ impl Engine {
                                     is_error,
                                 }],
                             ),
+                            c.clone(),
                         )
-                        .await;
+                        .await?;
                     }
                 }
             }
@@ -815,7 +1312,7 @@ impl Engine {
         self.emit_fact(EventPayload::CompactionStarted, c.clone()).await?;
 
         let generation = {
-            let mut s = self.surface.lock().await;
+            let s = self.surface.lock().await;
             // 代际取当前最大值 + 1：它是"这次压缩到底有没有效果"的客观依据。
             let next = s
                 .iter()
@@ -827,18 +1324,18 @@ impl Engine {
                 .unwrap_or(SurfaceGeneration(0))
                 .advance();
 
-            let seq = agentrs_contracts::ids::EventSequence(s.len() as u64 + 1);
-            s.push(crate::surface::SurfaceNode {
-                seq,
-                kind: agentrs_contracts::surface::SurfaceEventKind::AssistantMessage,
-                op: SurfaceOp::Replace {
-                    range: plan.range,
-                    generation: next,
-                },
-                message: summary,
-            });
             next
         };
+        self.record_surface(
+            agentrs_contracts::surface::SurfaceEventKind::AssistantMessage,
+            SurfaceOp::Replace {
+                range: plan.range,
+                generation,
+            },
+            summary,
+            c.clone(),
+        )
+        .await?;
 
         // 记录 source_range：**复用摘要，不重复压同一段**（§9.3 末段）。
         self.emit_fact(
@@ -882,6 +1379,10 @@ impl Engine {
     async fn cache_snapshot(
         &self,
         history: &[agentrs_types::Message],
+        component_generations: &std::collections::BTreeMap<
+            agentrs_contracts::ids::ComponentId,
+            agentrs_contracts::component::Generation,
+        >,
     ) -> agentrs_context::cache::RequestSnapshot {
         use agentrs_context::cache::{CacheLayout, RequestSnapshot, Segment};
         use agentrs_contracts::manifest::CacheSegment;
@@ -937,6 +1438,7 @@ impl Engine {
             stable: layout.segments.clone(),
             surface_invalidation: layout.surface_invalidation,
             provider: self.model.to_string(),
+            component_generations: component_generations.clone(),
             permission_mode: format!("{:?}", self.permission_mode),
             steering_injected: false,
         }
@@ -974,6 +1476,7 @@ impl Engine {
         // 先取文本再结算——shutdown 之后 Surface 仍在，但把顺序写死
         // 可以避免以后有人把 Surface 也纳入结算时出现空结果。
         let final_text = self.final_text().await;
+        let usage = *self.usage.lock().await;
 
         // 终态后拒绝新输入，并结算全部 live 资源。
         self.inbox.mark_terminal();
@@ -984,6 +1487,7 @@ impl Engine {
             turns: st.turns,
             steps: st.steps,
             zero_step_turns: st.zero_step_turns,
+            usage,
             final_text,
         }
     }
@@ -1001,12 +1505,14 @@ impl Engine {
 
         self.inbox.mark_terminal();
         let _ = self.owner.shutdown().await;
+        let usage = *self.usage.lock().await;
 
         RunSummary {
             termination: Termination::Failed { code: code.into() },
             turns: st.turns,
             steps: st.steps,
             zero_step_turns: st.zero_step_turns,
+            usage,
             // 事实流已经写不进去了。此时报告"助手说过什么"没有意义——
             // 那段文本能否算数取决于它有没有落盘，而这正是失败的原因。
             final_text: None,
@@ -1106,7 +1612,32 @@ mod tests {
         cancel: Arc<CancelToken>,
     }
 
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<agentrs_contracts::event::RunEventEnvelope>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RunEventSink for RecordingSink {
+        async fn publish(
+            &self,
+            event: agentrs_contracts::event::RunEventEnvelope,
+        ) -> Result<(), agentrs_contracts::ports::EventSinkError> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
     fn 装配(script: Vec<Vec<LlmEvent>>, admission: Arc<dyn StepAdmission>, guards: TurnGuards) -> Fixture {
+        装配带_sink(script, admission, guards, None)
+    }
+
+    fn 装配带_sink(
+        script: Vec<Vec<LlmEvent>>,
+        admission: Arc<dyn StepAdmission>,
+        guards: TurnGuards,
+        event_sink: Option<Arc<dyn RunEventSink>>,
+    ) -> Fixture {
         let persistence = Arc::new(agentrs_testkit::FakePersistence::new());
         let inbox = Arc::new(Inbox::new(16));
         let cancel = Arc::new(CancelToken::default());
@@ -1116,10 +1647,13 @@ mod tests {
             RunEpoch(1),
             EngineDeps {
                 persistence: persistence.clone(),
+                event_sink,
                 clock: Arc::new(FixedClock(Timestamp(0))),
                 driver: ScriptedDriver::new(script),
                 admission,
                 tools: None,
+                context: None,
+                components: None,
             },
             inbox.clone(),
             cancel.clone(),
@@ -1153,6 +1687,232 @@ mod tests {
         assert!(types.contains(&"TurnStarted".to_string()));
         assert!(types.contains(&"StepStarted".to_string()));
         assert!(types.contains(&"RunCompleted".to_string()));
+    }
+
+    #[tokio::test]
+    async fn manifest_先于模型请求边界持久化() {
+        let f = 装配(vec![文本_final("hi")], Arc::new(AdmitAll), TurnGuards::default());
+        f.engine.run().await;
+
+        let events = f.persistence.events();
+        let manifest = events
+            .iter()
+            .position(|event| matches!(event.payload, EventPayload::ModelRequestManifestRecorded { .. }))
+            .expect("必须记录 manifest");
+        let prepared = events
+            .iter()
+            .position(|event| matches!(event.payload, EventPayload::ModelRequestPrepared { .. }))
+            .expect("必须记录请求边界");
+        assert!(manifest < prepared, "恢复不能先看到请求边界、后看到构成清单");
+
+        let manifest_id = match &events[manifest].payload {
+            EventPayload::ModelRequestManifestRecorded { manifest } => &manifest.request_id,
+            _ => unreachable!(),
+        };
+        let request_id = match &events[prepared].payload {
+            EventPayload::ModelRequestPrepared { request_id } => request_id,
+            _ => unreachable!(),
+        };
+        assert_eq!(manifest_id, request_id);
+    }
+
+    #[tokio::test]
+    async fn manifest_记录本_operation_固定的_component_generations() {
+        use crate::generation::{
+            CandidateError, CandidateFactory, ComponentCandidate, CompositionProfile, GenerationManager,
+        };
+        use agentrs_contracts::authority::CapabilityView;
+        use agentrs_contracts::component::{
+            ComponentKind, ComponentManifest, ComponentScope, ComponentTrust,
+        };
+
+        struct Ready;
+        #[async_trait::async_trait]
+        impl CandidateFactory for Ready {
+            async fn prepare(
+                &self,
+                _candidate: &ComponentCandidate,
+                _generation: agentrs_contracts::component::Generation,
+                _owner: Arc<ResourceOwner>,
+            ) -> Result<(), CandidateError> {
+                Ok(())
+            }
+        }
+
+        let capabilities = CapabilityView {
+            tools: vec![],
+            providers: vec!["provider".into()],
+            models: vec!["model".into()],
+        };
+        let manager = GenerationManager::new(ResourceOwner::new("composition"));
+        manager
+            .apply_profile(
+                CompositionProfile {
+                    revision: 1,
+                    components: vec![ComponentCandidate {
+                        manifest: ComponentManifest {
+                            id: "provider.main".into(),
+                            source: "builtin:provider".into(),
+                            version: "1".into(),
+                            api_version: 1,
+                            kind: ComponentKind::Provider,
+                            requires: vec![],
+                            provides: vec!["provider".into()],
+                            config_schema: serde_json::json!({"type":"object"}),
+                            scope: ComponentScope::Run,
+                            trust: ComponentTrust::TrustedBuiltin,
+                            requested_capabilities: capabilities.clone(),
+                            redacted_config_fields: vec![],
+                        },
+                        config: serde_json::json!({}),
+                    }],
+                },
+                &capabilities,
+                &Ready,
+            )
+            .await
+            .unwrap();
+
+        let mut fixture = 装配(vec![文本_final("hi")], Arc::new(AdmitAll), TurnGuards::default());
+        fixture.engine.deps.components = Some(ComponentDeps {
+            manager: manager.clone(),
+            roots: vec!["provider.main".into()],
+        });
+        fixture.engine.run().await;
+        let generations = fixture
+            .persistence
+            .events()
+            .into_iter()
+            .find_map(|event| match event.payload {
+                EventPayload::ModelRequestManifestRecorded { manifest } => {
+                    Some(manifest.operation_view.component_generations)
+                }
+                _ => None,
+            })
+            .expect("manifest recorded");
+        assert_eq!(
+            generations[&agentrs_contracts::ids::ComponentId::new("provider.main")],
+            agentrs_contracts::component::Generation(1)
+        );
+        assert_eq!(manager.inventory().await.entries[0].in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn content_refs_进入请求并在_checkpoint_前被_retain() {
+        use agentrs_contracts::content::{ContentMeta, ContentScope};
+        use agentrs_contracts::ports::ContentStore;
+        use bytes::Bytes;
+
+        struct CaptureRequest(Mutex<Option<LlmRequest>>);
+        #[async_trait::async_trait]
+        impl StepDriver for CaptureRequest {
+            async fn call(&self, req: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                *self.0.lock().unwrap() = Some(req);
+                Ok(文本_final("done"))
+            }
+        }
+
+        let store = Arc::new(agentrs_testkit::FakeContentStore::new());
+        async fn put(
+            store: &agentrs_testkit::FakeContentStore,
+            text: &'static [u8],
+        ) -> agentrs_contracts::content::ContentRef {
+            store
+                .put(
+                    ContentScope::Run {
+                        run_id: "r-content".into(),
+                    },
+                    Bytes::from_static(text),
+                    ContentMeta::default(),
+                )
+                .await
+                .unwrap()
+        }
+        let system = put(&store, b"system-ref").await;
+        let memory = put(&store, b"memory-ref").await;
+        let skill = put(&store, b"skill-ref").await;
+        let compact = put(&store, b"compact-ref").await;
+        let persistence = Arc::new(agentrs_testkit::FakePersistence::new());
+        let captured = Arc::new(CaptureRequest(Mutex::new(None)));
+        let inbox = Arc::new(Inbox::new(8));
+        inbox
+            .submit(UserInput::Message(vec![agentrs_types::ContentBlock::text("go")]))
+            .await
+            .unwrap();
+        let engine = Engine::new(
+            "r-content".into(),
+            RunEpoch(1),
+            EngineDeps {
+                persistence: persistence.clone(),
+                event_sink: None,
+                clock: Arc::new(FixedClock(Timestamp(0))),
+                driver: captured.clone(),
+                admission: Arc::new(AdmitAll),
+                tools: None,
+                context: Some(ContextDeps {
+                    store: store.clone(),
+                    sources: ContextSources {
+                        system_sections: vec![system],
+                        memories: vec![MemoryFragment {
+                            id: "mem-1".into(),
+                            content: memory,
+                        }],
+                        skills: vec![SkillManifest {
+                            id: "skill-1".into(),
+                            version: "1".into(),
+                            content: skill,
+                            tool_subset: None,
+                        }],
+                        compaction_refs: vec![compact],
+                    },
+                }),
+                components: None,
+            },
+            inbox,
+            Arc::new(CancelToken::default()),
+            ResourceOwner::new("content-run"),
+            TurnGuards::default(),
+        )
+        .with_model("model", "base-system")
+        .with_run_context(
+            "authority".into(),
+            agentrs_contracts::authority::CapabilityViewDigest(Digest::from_hex("cap")),
+            agentrs_contracts::spec::ContextBudget {
+                max_input_tokens: 10_000,
+                reserved_output_tokens: 100,
+                compaction_threshold_pct: 80,
+            },
+            agentrs_contracts::version::SpecVersion(1),
+        );
+
+        let summary = engine.run().await;
+        assert_eq!(summary.termination, Termination::Completed);
+        let req = captured.0.lock().unwrap().clone().unwrap();
+        assert!(req.system.contains("system-ref"));
+        let messages = serde_json::to_string(&req.messages).unwrap();
+        assert!(messages.contains("memory-ref"));
+        assert!(messages.contains("skill-ref"));
+        assert!(messages.contains("compact-ref"));
+
+        let manifest = persistence
+            .events()
+            .into_iter()
+            .find_map(|event| match event.payload {
+                EventPayload::ModelRequestManifestRecorded { manifest } => Some(manifest),
+                _ => None,
+            });
+        let manifest = manifest.expect("manifest recorded");
+        assert_eq!(manifest.resolved_content_refs.len(), 4);
+        assert_eq!(
+            manifest.memory_fragments,
+            [agentrs_contracts::ids::MemoryId::new("mem-1")]
+        );
+        assert_eq!(
+            manifest.skill_fragments,
+            [agentrs_contracts::ids::SkillId::new("skill-1")]
+        );
+        assert!(persistence.checkpoint().is_some());
+        assert_eq!(store.collect_unretained(), 0, "checkpoint refs must remain live");
     }
 
     #[tokio::test]
@@ -1190,22 +1950,96 @@ mod tests {
 
     #[tokio::test]
     async fn live_文本增量不进入_durable_事实() {
-        let f = 装配(
+        let sink = Arc::new(RecordingSink::default());
+        let f = 装配带_sink(
             vec![文本_final("hello")],
             Arc::new(AdmitAll),
             TurnGuards::default(),
+            Some(sink.clone()),
         );
         f.engine.run().await;
 
-        let deltas = f
-            .persistence
-            .events()
+        assert!(
+            f.persistence.events().iter().all(|event| event.is_durable()),
+            "Persistence 只能收到 durable 事实"
+        );
+        let events = sink.events.lock().unwrap();
+        let delta = events
             .iter()
-            .filter(|e| matches!(e.payload, EventPayload::TextDelta))
-            .count();
-        // fake 持久化会记录所有 append，但 durability 标记必须是 LiveStream。
-        let live = f.persistence.events().iter().filter(|e| !e.is_durable()).count();
-        assert_eq!(deltas, live, "TextDelta 必须标记为 live，不参与恢复");
+            .find(|event| matches!(event.payload, EventPayload::TextDelta { .. }))
+            .expect("sink 必须收到文本增量");
+        assert_eq!(delta.seq, None);
+        assert_eq!(delta.live_seq, Some(agentrs_contracts::ids::LiveSequence(1)));
+        assert!(matches!(
+            &delta.payload,
+            EventPayload::TextDelta { text } if text == "hello"
+        ));
+        assert!(
+            events
+                .iter()
+                .filter(|event| event.is_durable())
+                .all(|event| event.seq.is_some() && event.live_seq.is_none()),
+            "sink 中的 durable 事实必须带持久序号"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_driver_完成前_live_delta_已到达_sink() {
+        struct GatedDriver {
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl StepDriver for GatedDriver {
+            async fn call(&self, _req: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                unreachable!("engine must use call_stream")
+            }
+
+            async fn call_stream(
+                &self,
+                _req: LlmRequest,
+                emit: Arc<dyn Fn(LlmEvent) + Send + Sync>,
+            ) -> Result<(), String> {
+                emit(LlmEvent::TextDelta("early".into()));
+                self.release.notified().await;
+                emit(LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                });
+                Ok(())
+            }
+        }
+
+        let sink = Arc::new(RecordingSink::default());
+        let mut fixture = 装配带_sink(
+            vec![],
+            Arc::new(AdmitAll),
+            TurnGuards::default(),
+            Some(sink.clone()),
+        );
+        let release = Arc::new(tokio::sync::Notify::new());
+        fixture.engine.deps.driver = Arc::new(GatedDriver {
+            release: release.clone(),
+        });
+        let task = tokio::spawn(async move { fixture.engine.run().await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if sink.events.lock().unwrap().iter().any(
+                    |event| matches!(&event.payload, EventPayload::TextDelta { text } if text == "early"),
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live delta must not wait for provider completion");
+        assert!(!task.is_finished());
+
+        release.notify_one();
+        let summary = task.await.unwrap();
+        assert_eq!(summary.termination, Termination::Completed);
     }
 
     #[tokio::test]
@@ -1280,10 +2114,13 @@ mod tests {
             RunEpoch(1),
             EngineDeps {
                 persistence: persistence.clone(),
+                event_sink: None,
                 clock: Arc::new(FixedClock(Timestamp(0))),
                 driver: ScriptedDriver::new(vec![文本_final("x")]),
                 admission: Arc::new(AdmitAll),
                 tools: None,
+                context: None,
+                components: None,
             },
             inbox.clone(),
             Arc::new(CancelToken::default()),

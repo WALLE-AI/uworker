@@ -231,6 +231,17 @@ impl LocalFileSandbox {
             .count()
     }
 
+    /// Discards every uncommitted entry in a ChangeSet and returns its size.
+    ///
+    /// This is an explicit host action, symmetric with [`Self::commit`]. It
+    /// never touches workspace files because overlay entries have not landed.
+    pub fn discard(&self, change_set: &str) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let before = state.overlay.len();
+        state.overlay.retain(|(cs, _), _| cs != change_set);
+        before - state.overlay.len()
+    }
+
     fn reject(id: ExecutionId, reason: RejectReason) -> ExecutionResult {
         ExecutionResult {
             execution_id: id,
@@ -579,6 +590,22 @@ mod tests {
         assert_eq!(sb.commit("cs1").unwrap(), 1);
         assert_eq!(std::fs::read_to_string(d.path().join("x.md")).unwrap(), "c");
         assert_eq!(sb.pending_count("cs1"), 0);
+    }
+
+    #[tokio::test]
+    async fn discard_清空_overlay_但不触碰磁盘() {
+        let (sb, d) = 沙箱();
+        sb.issue_grant("g1", hash("h"), Timestamp(i64::MAX));
+        sb.execute(
+            grant(),
+            请求("Write", serde_json::json!({"path":"discard.md","content":"c"})),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sb.discard("cs1"), 1);
+        assert_eq!(sb.pending_count("cs1"), 0);
+        assert!(!d.path().join("discard.md").exists());
     }
 
     #[tokio::test]

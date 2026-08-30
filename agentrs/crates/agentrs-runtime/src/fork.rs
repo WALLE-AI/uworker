@@ -302,7 +302,7 @@ mod tests {
         // 类型上就不可能指向一条 live delta。
         let events = vec![
             事件(1, EventPayload::RunStarted, true),
-            事件(2, EventPayload::TextDelta, false), // live，不计入
+            事件(2, EventPayload::TextDelta { text: "x".into() }, false), // live，不计入
         ];
         let f = fork(&规格(None), &events, &源规格(), None, 信封(&["Read"])).unwrap();
         assert_eq!(

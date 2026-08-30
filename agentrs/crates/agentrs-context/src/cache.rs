@@ -14,6 +14,8 @@
 //! 前缀天然稳定；一次 `Replace` 从其 `range.start` 起使前缀失效，而**失效点是
 //! 已知且可精确计算的**，不需要靠约定去近似。
 
+use agentrs_contracts::component::Generation;
+use agentrs_contracts::ids::ComponentId;
 use agentrs_contracts::ids::{Digest, EventSequence};
 use agentrs_contracts::manifest::{CacheBreakCause, CacheSegment};
 
@@ -102,6 +104,8 @@ pub struct RequestSnapshot {
     pub surface_invalidation: Option<EventSequence>,
     /// 本次使用的 provider。
     pub provider: String,
+    /// 本 operation 固定的组件代际。
+    pub component_generations: std::collections::BTreeMap<ComponentId, Generation>,
     /// 本次的权限模式判别串。
     pub permission_mode: String,
     /// 本次是否由 steering 注入触发。
@@ -125,6 +129,9 @@ pub fn attribute(prev: Option<&RequestSnapshot>, curr: &RequestSnapshot) -> Opti
     // 按"根因优先"排序：provider 切换会连带改变一切，先判它。
     if prev.provider != curr.provider {
         return Some(CacheBreakCause::ProviderSwitched);
+    }
+    if prev.component_generations != curr.component_generations {
+        return Some(CacheBreakCause::ComponentGenerationChanged);
     }
     if prev.permission_mode != curr.permission_mode {
         // 模式切换同时改变系统段与工具目录投影，归因到模式本身更有解释力。
@@ -223,6 +230,7 @@ mod tests {
             stable: layout.stable_segments().cloned().collect(),
             surface_invalidation: layout.surface_invalidation,
             provider: "p1".into(),
+            component_generations: Default::default(),
             permission_mode: "default".into(),
             steering_injected: false,
         }
@@ -354,6 +362,20 @@ mod tests {
         assert_eq!(
             attribute(Some(&prev), &curr),
             Some(CacheBreakCause::ProviderSwitched)
+        );
+    }
+
+    #[test]
+    fn component_generation_变化在段变化之前归因() {
+        let layout = 标准布局();
+        let a = 快照(&layout);
+        let mut b = a.clone();
+        b.prefix_digest = Digest::from_hex("changed");
+        b.stable[1].digest = Digest::from_hex("new-tools");
+        b.component_generations.insert("tools.mcp".into(), Generation(2));
+        assert_eq!(
+            attribute(Some(&a), &b),
+            Some(CacheBreakCause::ComponentGenerationChanged)
         );
     }
 

@@ -12,6 +12,7 @@ use agentrs_testkit::FakePolicy;
 
 fn 提议(name: &str) -> ToolProposal {
     ToolProposal {
+        step_id: "s1".into(),
         call_id: "c1".into(),
         tool_name: name.into(),
         arguments: serde_json::json!({}),

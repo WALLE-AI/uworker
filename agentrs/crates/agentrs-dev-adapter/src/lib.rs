@@ -19,10 +19,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod interactive_policy;
 pub mod persistence;
 pub mod policy;
 pub mod sandbox;
 
+pub use interactive_policy::{ApprovalAnswer, ApprovalPrompt, InteractiveDevPolicy};
 pub use persistence::JsonlPersistence;
 pub use policy::DevPolicy;
 pub use sandbox::LocalFileSandbox;

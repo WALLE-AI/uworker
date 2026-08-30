@@ -111,6 +111,7 @@ mod tests {
 
     fn 提议(tool: &str) -> ToolProposal {
         ToolProposal {
+            step_id: "s1".into(),
             call_id: "c1".into(),
             tool_name: tool.into(),
             arguments: serde_json::json!({}),

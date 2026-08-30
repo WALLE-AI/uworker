@@ -44,6 +44,7 @@ fn 需要审批(hash: InputHash) -> PolicyDecision {
     PolicyDecision::RequireApproval(ApprovalRequest {
         step_id: "s1".into(),
         proposal: ToolProposal {
+            step_id: "s1".into(),
             call_id: "c1".into(),
             tool_name: "Write".into(),
             arguments: serde_json::json!({}),

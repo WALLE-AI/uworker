@@ -218,6 +218,7 @@ mod tests {
             ],
             surface_invalidation: None,
             provider: provider.into(),
+            component_generations: Default::default(),
             permission_mode: "default".into(),
             steering_injected: false,
         }

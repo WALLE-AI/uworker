@@ -148,11 +148,18 @@ pub fn parse_chunk(payload: &str) -> Result<Vec<LlmEvent>, String> {
         for c in calls {
             out.push(LlmEvent::ToolCallDelta {
                 index: c.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
-                id: c.get("id").and_then(Value::as_str).map(str::to_string),
+                id: c
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
                 name: c
                     .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(Value::as_str)
+                    // SiliconFlow/DeepSeek may repeat `name: ""` on later
+                    // argument frames. Empty strings are absence, not updates.
+                    .filter(|value| !value.is_empty())
                     .map(str::to_string),
                 arguments: c
                     .get("function")
@@ -450,5 +457,32 @@ mod tests {
     #[test]
     fn 畸形帧返回错误而非_panic() {
         assert!(parse_chunk("not json").is_err());
+    }
+
+    #[test]
+    fn 空工具名增量不覆盖首帧名称() {
+        let mut events = Vec::new();
+        events.extend(
+            parse_chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"Write","arguments":"{\"path\":"}}]}}]}"#,
+            )
+            .unwrap(),
+        );
+        events.extend(
+            parse_chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"\"x.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            )
+            .unwrap(),
+        );
+
+        let output = finalize(events);
+        let tool = output.iter().find_map(|event| match event {
+            LlmEvent::ToolUse { id, name, input, .. } => Some((id, name, input)),
+            _ => None,
+        });
+        let (id, name, input) = tool.expect("complete tool call");
+        assert_eq!(id.as_str(), "call-1");
+        assert_eq!(name, "Write");
+        assert_eq!(input, &serde_json::json!({"path":"x.txt"}));
     }
 }

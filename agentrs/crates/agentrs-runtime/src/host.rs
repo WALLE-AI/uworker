@@ -16,7 +16,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agentrs_contracts::ids::{RunEpoch, RunId};
+use agentrs_contracts::event::RunEventEnvelope;
+use agentrs_contracts::ids::{EventSequence, RunEpoch, RunId};
 use agentrs_contracts::spec::{RunCheckpoint, RunSpec};
 use agentrs_contracts::version::{CompatVerdict, CompatWindow, COMPAT_WINDOW};
 use futures::future::BoxFuture;
@@ -38,6 +39,37 @@ pub enum StartError {
     /// 同一 Run 已在本 host 上活跃。
     #[error("run already active")]
     AlreadyActive,
+    /// `CapabilityView`、模型策略或工作区超出了 Core 签发的授权上界。
+    #[error("capability outside authority: {kind}={value}")]
+    OutsideAuthority {
+        /// 越界的能力种类。
+        kind: &'static str,
+        /// 越界值。这里只包含稳定标识，不包含用户正文。
+        value: String,
+    },
+    /// 启动所需能力当前不可用。撤回的能力不得靠 fallback 悄悄复活。
+    #[error("capability unavailable: {kind}={value}")]
+    UnavailableCapability {
+        /// 不可用的能力种类。
+        kind: &'static str,
+        /// 不可用值。
+        value: String,
+    },
+    /// Durable history cannot be replayed deterministically.
+    #[error("invalid durable replay: {0}")]
+    InvalidReplay(String),
+    /// The durable log already contains a terminal event.
+    #[error("run is already terminal")]
+    AlreadyTerminal,
+    /// Recovery must first coordinate with Policy, Sandbox, or the user.
+    #[error("recovery requires external action: {0}")]
+    RecoveryNeedsAction(&'static str),
+}
+
+struct RecoveryState {
+    surface: Vec<crate::surface::SurfaceNode>,
+    last_seq: EventSequence,
+    epoch_floor: RunEpoch,
 }
 
 /// 取消原因。
@@ -134,6 +166,14 @@ impl RuntimeHost {
         next
     }
 
+    async fn next_epoch_after(&self, run_id: &RunId, floor: RunEpoch) -> RunEpoch {
+        let mut epochs = self.epochs.lock().await;
+        let current = epochs.get(run_id).copied().unwrap_or(RunEpoch(0));
+        let next = RunEpoch(current.0.max(floor.0)).next();
+        epochs.insert(run_id.clone(), next);
+        next
+    }
+
     /// 启动一次新的 Run。
     pub async fn start(
         &self,
@@ -141,7 +181,7 @@ impl RuntimeHost {
         deps: EngineDeps,
         guards: TurnGuards,
     ) -> Result<StartedRun, StartError> {
-        self.launch(spec, deps, guards, Vec::new()).await
+        self.launch(spec, deps, guards, Vec::new(), None).await
     }
 
     /// 启动并提供模型可见的工具目录。
@@ -154,7 +194,7 @@ impl RuntimeHost {
         guards: TurnGuards,
         tools: Vec<agentrs_types::ToolDef>,
     ) -> Result<StartedRun, StartError> {
-        self.launch(spec, deps, guards, tools).await
+        self.launch(spec, deps, guards, tools, None).await
     }
 
     /// 从 checkpoint 恢复。
@@ -177,7 +217,94 @@ impl RuntimeHost {
 
         let mut spec = spec;
         spec.checkpoint = Some(checkpoint);
-        self.launch(spec, deps, guards, Vec::new()).await
+        self.launch(spec, deps, guards, Vec::new(), None).await
+    }
+
+    /// Resume from a validated durable event prefix.
+    ///
+    /// Unsafe boundaries are reported to Core rather than replayed. In particular,
+    /// an unresolved execution intent is never converted into a fresh tool call.
+    pub async fn resume_from_events(
+        &self,
+        mut spec: RunSpec,
+        checkpoint: RunCheckpoint,
+        events: &[RunEventEnvelope],
+        deps: EngineDeps,
+        guards: TurnGuards,
+        tools: Vec<agentrs_types::ToolDef>,
+    ) -> Result<StartedRun, StartError> {
+        match self.window().verdict(checkpoint.spec_version) {
+            CompatVerdict::TooOld => return Err(StartError::SpecTooOld),
+            CompatVerdict::TooNew => return Err(StartError::SpecTooNew),
+            CompatVerdict::Exact | CompatVerdict::NeedsMigration => {}
+        }
+        let mut last_seq = EventSequence(0);
+        let mut epoch_floor = RunEpoch(0);
+        for event in events.iter().filter(|event| event.is_durable()) {
+            if event.run_id != spec.run_id {
+                return Err(StartError::InvalidReplay("run_id mismatch".into()));
+            }
+            let seq = event
+                .seq
+                .ok_or_else(|| StartError::InvalidReplay("durable event missing seq".into()))?;
+            if seq <= last_seq {
+                return Err(StartError::InvalidReplay(
+                    "event sequence is not strictly increasing".into(),
+                ));
+            }
+            last_seq = seq;
+            epoch_floor = RunEpoch(epoch_floor.0.max(event.epoch.0));
+        }
+        if checkpoint.up_to_seq > last_seq {
+            return Err(StartError::InvalidReplay(
+                "checkpoint points past durable history".into(),
+            ));
+        }
+        match crate::recovery::plan(events) {
+            crate::recovery::RecoveryPlan::AlreadyTerminal => return Err(StartError::AlreadyTerminal),
+            crate::recovery::RecoveryPlan::ResolvePartialOutput { .. } => {
+                return Err(StartError::RecoveryNeedsAction("partial_output"));
+            }
+            crate::recovery::RecoveryPlan::ReconcileExecution { .. } => {
+                return Err(StartError::RecoveryNeedsAction("reconcile_execution"));
+            }
+            crate::recovery::RecoveryPlan::RedeemApproval { .. } => {
+                return Err(StartError::RecoveryNeedsAction("redeem_approval"));
+            }
+            crate::recovery::RecoveryPlan::ReissueApproval { .. } => {
+                return Err(StartError::RecoveryNeedsAction("reissue_approval"));
+            }
+            crate::recovery::RecoveryPlan::Fresh
+            | crate::recovery::RecoveryPlan::RetryModelRequest { .. }
+            | crate::recovery::RecoveryPlan::ReuseCompaction { .. } => {}
+        }
+        let surface = crate::surface::from_events(events)
+            .map_err(|_| StartError::InvalidReplay("surface message is malformed".into()))?;
+        let has_message_boundary = events.iter().any(|event| {
+            matches!(
+                event.payload,
+                agentrs_contracts::event::EventPayload::UserInputSubmitted
+                    | agentrs_contracts::event::EventPayload::AssistantMessage
+            )
+        });
+        if has_message_boundary && surface.is_empty() {
+            return Err(StartError::InvalidReplay(
+                "message history predates durable surface payloads".into(),
+            ));
+        }
+        spec.checkpoint = Some(checkpoint);
+        self.launch(
+            spec,
+            deps,
+            guards,
+            tools,
+            Some(RecoveryState {
+                surface,
+                last_seq,
+                epoch_floor,
+            }),
+        )
+        .await
     }
 
     async fn launch(
@@ -186,9 +313,14 @@ impl RuntimeHost {
         deps: EngineDeps,
         guards: TurnGuards,
         tools: Vec<agentrs_types::ToolDef>,
+        recovery: Option<RecoveryState>,
     ) -> Result<StartedRun, StartError> {
+        let tools = validate_and_project(&spec, tools)?;
         let run_id = spec.run_id.clone();
-        let epoch = self.next_epoch(&run_id).await;
+        let epoch = match &recovery {
+            Some(state) => self.next_epoch_after(&run_id, state.epoch_floor).await,
+            None => self.next_epoch(&run_id).await,
+        };
 
         let inbox = Arc::new(Inbox::new(STEERING_CAPACITY));
         let cancel = Arc::new(CancelToken::default());
@@ -202,7 +334,10 @@ impl RuntimeHost {
             .get(&agentrs_contracts::spec::ModelTier::Default)
             .cloned()
             .or_else(|| spec.initial_capabilities.models.first().cloned())
-            .unwrap_or_else(|| "default".into());
+            .ok_or_else(|| StartError::UnavailableCapability {
+                kind: "model",
+                value: "default-tier".into(),
+            })?;
 
         let system_prompt = spec.system_context.sections.join("\n\n");
         let workspace = spec
@@ -211,7 +346,7 @@ impl RuntimeHost {
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        let engine = Engine::new(
+        let mut engine = Engine::new(
             run_id.clone(),
             epoch,
             deps,
@@ -221,10 +356,19 @@ impl RuntimeHost {
             guards,
         )
         .with_model(model, system_prompt)
+        .with_run_context(
+            spec.authority.id.clone(),
+            capability_digest(&spec.initial_capabilities),
+            spec.context_budget,
+            spec.spec_version,
+        )
         .with_workspace(workspace, format!("cs-{run_id}"))
         .with_tools(tools)
         // 必须在 with_tools 之后：它要在**完整**目录上做投影。
         .with_permission_mode(spec.permission_mode.clone());
+        if let Some(state) = recovery {
+            engine = engine.with_recovery_state(state.surface, state.last_seq);
+        }
 
         let handle = RunHandle {
             run_id,
@@ -245,6 +389,99 @@ impl RuntimeHost {
     pub async fn known_epoch(&self, run_id: &RunId) -> Option<RunEpoch> {
         self.epochs.lock().await.get(run_id).copied()
     }
+}
+
+/// 在创建 live resource、分配 epoch 之前校验 RunSpec，并投影工具目录。
+fn validate_and_project(
+    spec: &RunSpec,
+    tools: Vec<agentrs_types::ToolDef>,
+) -> Result<Vec<agentrs_types::ToolDef>, StartError> {
+    fn require_subset<T: PartialEq + ToString>(
+        current: &[T],
+        upper: &[T],
+        kind: &'static str,
+    ) -> Result<(), StartError> {
+        if let Some(value) = current.iter().find(|value| !upper.contains(value)) {
+            return Err(StartError::OutsideAuthority {
+                kind,
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    require_subset(&spec.initial_capabilities.tools, &spec.authority.tools, "tool")?;
+    require_subset(
+        &spec.initial_capabilities.providers,
+        &spec.authority.providers,
+        "provider",
+    )?;
+    require_subset(&spec.initial_capabilities.models, &spec.authority.models, "model")?;
+
+    if let Some(workspace) = &spec.system_context.workspace_id {
+        if !spec.authority.workspaces.contains(workspace) {
+            return Err(StartError::OutsideAuthority {
+                kind: "workspace",
+                value: workspace.clone(),
+            });
+        }
+    }
+
+    for provider in &spec.model_policy.providers {
+        if !spec.authority.providers.contains(provider) {
+            return Err(StartError::OutsideAuthority {
+                kind: "provider",
+                value: provider.to_string(),
+            });
+        }
+        if !spec.initial_capabilities.providers.contains(provider) {
+            return Err(StartError::UnavailableCapability {
+                kind: "provider",
+                value: provider.to_string(),
+            });
+        }
+    }
+
+    for model in spec
+        .model_policy
+        .tiers
+        .values()
+        .chain(spec.model_policy.fallback.iter())
+    {
+        if !spec.authority.models.contains(model) {
+            return Err(StartError::OutsideAuthority {
+                kind: "model",
+                value: model.to_string(),
+            });
+        }
+        if !spec.initial_capabilities.models.contains(model) {
+            return Err(StartError::UnavailableCapability {
+                kind: "model",
+                value: model.to_string(),
+            });
+        }
+    }
+
+    Ok(tools
+        .into_iter()
+        .filter(|tool| {
+            spec.authority.tools.contains(&tool.name) && spec.initial_capabilities.tools.contains(&tool.name)
+        })
+        .collect())
+}
+
+fn capability_digest(
+    view: &agentrs_contracts::authority::CapabilityView,
+) -> agentrs_contracts::authority::CapabilityViewDigest {
+    let bytes = serde_json::to_vec(view).expect("CapabilityView is serializable");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    agentrs_contracts::authority::CapabilityViewDigest(agentrs_contracts::ids::Digest::from_hex(format!(
+        "{hash:016x}"
+    )))
 }
 
 /// steering 队列上限。超过后 `submit` 返回 `QueueFull`，避免无界增长。
@@ -291,20 +528,22 @@ mod tests {
                 id: "e".into(),
                 workspaces: vec![],
                 tools: vec![],
-                providers: vec![],
-                models: vec![],
+                providers: vec!["p".into()],
+                models: vec!["m".into()],
                 max_depth: 1,
             },
             initial_capabilities: CapabilityView {
                 tools: vec![],
-                providers: vec![],
-                models: vec![],
+                providers: vec!["p".into()],
+                models: vec!["m".into()],
             },
             permission_mode: PermissionMode::Default,
             model_policy: ModelPolicy {
-                tiers: Default::default(),
+                tiers: [(agentrs_contracts::spec::ModelTier::Default, "m".into())]
+                    .into_iter()
+                    .collect(),
                 fallback: vec![],
-                providers: vec![],
+                providers: vec!["p".into()],
                 max_retries: 0,
                 allow_attachments: false,
             },
@@ -323,10 +562,13 @@ mod tests {
     fn 依赖(p: Arc<agentrs_testkit::FakePersistence>) -> EngineDeps {
         EngineDeps {
             persistence: p,
+            event_sink: None,
             clock: Arc::new(FixedClock(Timestamp(0))),
             driver: Arc::new(OneShot),
             admission: Arc::new(AdmitAll),
             tools: None,
+            context: None,
+            components: None,
         }
     }
 
@@ -495,5 +737,263 @@ mod tests {
         assert_eq!(p.event_count(), 0, "未驱动时不产生任何事件");
         drop(r.driver);
         assert_eq!(p.event_count(), 0, "丢弃 driver 同样不产生事件");
+    }
+
+    #[tokio::test]
+    async fn 能力视图不能超出授权信封() {
+        let host = RuntimeHost::new();
+        let p = Arc::new(agentrs_testkit::FakePersistence::new());
+        let mut spec = 规格("r1", SpecVersion(1));
+        spec.initial_capabilities.tools.push("Write".into());
+
+        let error = host.start(spec, 依赖(p), TurnGuards::default()).await.err();
+        assert_eq!(
+            error,
+            Some(StartError::OutsideAuthority {
+                kind: "tool",
+                value: "Write".into(),
+            })
+        );
+        assert_eq!(
+            host.known_epoch(&"r1".into()).await,
+            None,
+            "拒绝启动不能消耗 epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn 模型策略不能复活已撤回模型() {
+        let host = RuntimeHost::new();
+        let p = Arc::new(agentrs_testkit::FakePersistence::new());
+        let mut spec = 规格("r1", SpecVersion(1));
+        spec.initial_capabilities.models.clear();
+
+        let error = host.start(spec, 依赖(p), TurnGuards::default()).await.err();
+        assert_eq!(
+            error,
+            Some(StartError::UnavailableCapability {
+                kind: "model",
+                value: "m".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn 工具目录取注册项与当前能力的交集() {
+        use std::sync::Mutex as StdMutex;
+
+        struct Capture(Arc<StdMutex<Option<LlmRequest>>>);
+        #[async_trait::async_trait]
+        impl StepDriver for Capture {
+            async fn call(&self, request: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                *self.0.lock().unwrap() = Some(request);
+                Ok(vec![LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                }])
+            }
+        }
+
+        let host = RuntimeHost::new();
+        let p = Arc::new(agentrs_testkit::FakePersistence::new());
+        let captured = Arc::new(StdMutex::new(None));
+        let mut spec = 规格("r1", SpecVersion(1));
+        spec.authority.tools = vec!["Read".into(), "Write".into()];
+        spec.initial_capabilities.tools = vec!["Read".into()];
+        let deps = EngineDeps {
+            persistence: p,
+            event_sink: None,
+            clock: Arc::new(FixedClock(Timestamp(0))),
+            driver: Arc::new(Capture(captured.clone())),
+            admission: Arc::new(AdmitAll),
+            tools: None,
+            context: None,
+            components: None,
+        };
+        let run = host
+            .start_with_tools(
+                spec,
+                deps,
+                TurnGuards::default(),
+                vec![
+                    agentrs_types::ToolDef::read_only("Read", "read", serde_json::json!({})),
+                    agentrs_types::ToolDef::mutating("Write", "write", serde_json::json!({})),
+                    agentrs_types::ToolDef::mutating("Exec", "exec", serde_json::json!({})),
+                ],
+            )
+            .await
+            .unwrap();
+        run.handle
+            .submit(UserInput::Message(vec![ContentBlock::text("go")]))
+            .await
+            .unwrap();
+        run.driver.await;
+
+        let request = captured.lock().unwrap().take().unwrap();
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Read"]
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_from_events_恢复_surface_并推进历史_epoch() {
+        use std::sync::Mutex as StdMutex;
+
+        use agentrs_contracts::event::{Causality, Durability, EventPayload, Visibility};
+        use agentrs_contracts::ports::RunPersistence;
+        use agentrs_contracts::surface::{SurfaceEventKind, SurfaceMarker, SurfaceOp};
+        use agentrs_types::{Message, Role};
+
+        struct Capture(Arc<StdMutex<Option<LlmRequest>>>);
+        #[async_trait::async_trait]
+        impl StepDriver for Capture {
+            async fn call(&self, request: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                *self.0.lock().unwrap() = Some(request);
+                Ok(vec![
+                    LlmEvent::TextDelta("resumed".into()),
+                    LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    },
+                ])
+            }
+        }
+
+        fn event(id: &str, payload: EventPayload, surface: Option<SurfaceMarker>) -> RunEventEnvelope {
+            RunEventEnvelope {
+                run_id: "r-resume".into(),
+                epoch: RunEpoch(3),
+                event_id: id.into(),
+                seq: None,
+                live_seq: None,
+                at: Timestamp(0),
+                durability: Durability::DurableFact,
+                visibility: Visibility::User,
+                causality: Causality::default(),
+                surface,
+                payload,
+            }
+        }
+
+        let persistence = Arc::new(agentrs_testkit::FakePersistence::new());
+        let prior = Message::new(Role::User, vec![ContentBlock::text("continue this")]);
+        persistence
+            .append_event(
+                RunEpoch(3),
+                event(
+                    "old-1",
+                    EventPayload::SurfaceMessageRecorded {
+                        message: serde_json::to_value(&prior).unwrap(),
+                    },
+                    Some(SurfaceMarker {
+                        kind: SurfaceEventKind::UserMessage,
+                        op: SurfaceOp::Append,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        persistence
+            .append_event(
+                RunEpoch(3),
+                event(
+                    "old-2",
+                    EventPayload::ModelRequestPrepared {
+                        request_id: "r-resume-req".into(),
+                    },
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let events = persistence.events();
+        let captured = Arc::new(StdMutex::new(None));
+        let deps = EngineDeps {
+            persistence: persistence.clone(),
+            event_sink: None,
+            clock: Arc::new(FixedClock(Timestamp(0))),
+            driver: Arc::new(Capture(captured.clone())),
+            admission: Arc::new(AdmitAll),
+            tools: None,
+            context: None,
+            components: None,
+        };
+        let resumed = RuntimeHost::new()
+            .resume_from_events(
+                规格("r-resume", SpecVersion(1)),
+                RunCheckpoint {
+                    spec_version: SpecVersion(1),
+                    up_to_seq: EventSequence(2),
+                    pending_approval: None,
+                },
+                &events,
+                deps,
+                TurnGuards::default(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.epoch(), RunEpoch(4));
+        let summary = resumed.driver.await;
+        assert_eq!(summary.termination, Termination::Completed);
+        let request = captured.lock().unwrap().take().unwrap();
+        assert_eq!(request.messages.first(), Some(&prior));
+    }
+
+    #[tokio::test]
+    async fn resume_from_events_拒绝静默重放部分输出() {
+        use agentrs_contracts::event::{Causality, Durability, EventPayload, Visibility};
+
+        let events = vec![
+            RunEventEnvelope {
+                run_id: "r-partial".into(),
+                epoch: RunEpoch(2),
+                event_id: "e1".into(),
+                seq: Some(EventSequence(1)),
+                live_seq: None,
+                at: Timestamp(0),
+                durability: Durability::DurableFact,
+                visibility: Visibility::User,
+                causality: Causality::default(),
+                surface: None,
+                payload: EventPayload::ModelRequestPrepared {
+                    request_id: "q".into(),
+                },
+            },
+            RunEventEnvelope {
+                run_id: "r-partial".into(),
+                epoch: RunEpoch(2),
+                event_id: "e2".into(),
+                seq: Some(EventSequence(2)),
+                live_seq: None,
+                at: Timestamp(0),
+                durability: Durability::DurableFact,
+                visibility: Visibility::User,
+                causality: Causality::default(),
+                surface: None,
+                payload: EventPayload::PartialOutputStarted,
+            },
+        ];
+        let error = RuntimeHost::new()
+            .resume_from_events(
+                规格("r-partial", SpecVersion(1)),
+                RunCheckpoint {
+                    spec_version: SpecVersion(1),
+                    up_to_seq: EventSequence(2),
+                    pending_approval: None,
+                },
+                &events,
+                依赖(Arc::new(agentrs_testkit::FakePersistence::new())),
+                TurnGuards::default(),
+                Vec::new(),
+            )
+            .await
+            .err();
+        assert_eq!(error, Some(StartError::RecoveryNeedsAction("partial_output")));
     }
 }

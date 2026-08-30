@@ -55,6 +55,27 @@ pub trait RunPersistence: Send + Sync {
     async fn save_checkpoint(&self, epoch: RunEpoch, checkpoint: RunCheckpoint) -> Result<(), PersistError>;
 }
 
+/// Run 事件的实时投递端口。
+///
+/// Persistence 只保存 durable 事实；live delta 通过本端口交给宿主。宿主必须把
+/// sink 当作可丢失的观察面，不能用投递成功与否决定 durable 事实是否成立。
+#[async_trait]
+pub trait RunEventSink: Send + Sync {
+    /// 发布一条已经分配好相应序号的事件。
+    async fn publish(&self, event: RunEventEnvelope) -> Result<(), EventSinkError>;
+}
+
+/// 实时事件投递失败。
+#[derive(Debug, thiserror::Error)]
+pub enum EventSinkError {
+    /// 消费端已经关闭。
+    #[error("event sink closed")]
+    Closed,
+    /// 有界队列无法接收更多事件。
+    #[error("event sink lagged")]
+    Lagged,
+}
+
 /// 持久化错误。
 #[derive(Debug, thiserror::Error)]
 pub enum PersistError {

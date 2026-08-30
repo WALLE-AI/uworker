@@ -64,6 +64,13 @@ async fn 真实端点跑通文本_final() {
             _ => None,
         })
         .collect();
+    let reasoning: String = events
+        .iter()
+        .filter_map(|e| match e {
+            LlmEvent::ThinkingDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
 
     let done = events.iter().find_map(|e| match e {
         LlmEvent::Done { stop_reason, usage } => Some((*stop_reason, *usage)),
@@ -71,9 +78,16 @@ async fn 真实端点跑通文本_final() {
     });
 
     println!("文本: {text:?}");
+    println!("推理字符数: {}", reasoning.chars().count());
     println!("终止: {done:?}");
 
     assert!(!text.is_empty(), "必须收到文本增量；实际事件: {events:?}");
+    if cfg.model.to_ascii_lowercase().contains("deepseek-r1") {
+        assert!(
+            !reasoning.is_empty(),
+            "DeepSeek-R1 必须把 reasoning_content 映射为 ThinkingDelta"
+        );
+    }
     let (stop, usage) = done.expect("必须收到 Done 事件");
     assert!(
         matches!(stop, StopReason::EndTurn | StopReason::MaxTokens),

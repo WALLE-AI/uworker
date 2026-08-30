@@ -37,11 +37,13 @@ fi
 # 两处豁免，都是 OS 与内核之间的翻译层：
 #   agentrs-cli         —— 它的职责就是把命令行参数与环境翻译为 RunSpec（架构 §3.1）；
 #   agentrs-dev-adapter —— 显式的宿主参考实现。
+#   agentrs-dev-tui     —— 非生产交互宿主，把终端输入与 provider 配置翻译为 RunSpec。
 # 内核库（contracts/types/runtime/provider/context/tools/...）依然禁止。
 if hits=$(grep -rnE 'std::env::var' crates --include='*.rs' \
         | grep -v '/tests/' \
         | grep -v '^crates/agentrs-cli/' \
         | grep -v '^crates/agentrs-dev-adapter/' \
+        | grep -v '^crates/agentrs-dev-tui/' \
         | grep -v '^\s*//'); then
     echo "内核中读取环境变量（凭据与配置必须由 RunSpec/构造参数注入）："
     echo "$hits"

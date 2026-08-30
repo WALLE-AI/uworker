@@ -385,6 +385,7 @@ impl PolicySubject for 受检策略 {
 
     fn allowed_proposal(&self, tag: &str) -> ToolProposal {
         ToolProposal {
+            step_id: "s-conformance".into(),
             call_id: tag.into(),
             tool_name: "Write".into(),
             arguments: serde_json::json!({}),

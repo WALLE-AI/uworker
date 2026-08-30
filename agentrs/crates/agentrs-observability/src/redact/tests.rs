@@ -216,7 +216,7 @@ fn bundle_头部记下了盐() {
 #[test]
 fn bundle_只含_durable_事件() {
     // live delta 可丢。导出它只会让 bundle 在"丢了"和"没丢"两种情况下不一致。
-    let mut live = 事件(2, EventPayload::TextDelta);
+    let mut live = 事件(2, EventPayload::TextDelta { text: "x".into() });
     live.seq = None;
     live.durability = Durability::LiveStream;
 

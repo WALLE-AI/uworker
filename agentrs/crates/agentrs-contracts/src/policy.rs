@@ -25,6 +25,9 @@ pub struct InputHash(pub Digest);
 /// 模型提出的工具调用，尚未经过任何裁决。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolProposal {
+    /// 所属 Step。旧版本缺少该字段时使用稳定的未知占位，策略应 fail closed。
+    #[serde(default = "unknown_step_id")]
+    pub step_id: StepId,
     /// provider 侧的调用 id。
     pub call_id: ToolCallId,
     /// 工具名。
@@ -37,6 +40,10 @@ pub struct ToolProposal {
     pub change_set_id: ChangeSetId,
     /// 输入指纹。
     pub input_hash: InputHash,
+}
+
+fn unknown_step_id() -> StepId {
+    StepId::new("unknown")
 }
 
 /// 沙箱执行授权。内核视其载荷为**不透明**，只负责搬运与一次性消费记账。

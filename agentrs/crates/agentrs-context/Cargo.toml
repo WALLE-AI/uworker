@@ -9,9 +9,13 @@ description = "AgentRS: token 账本、预算裁剪、请求装配与缓存分�
 [dependencies]
 agentrs-contracts = { workspace = true }
 agentrs-types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+agentrs-testkit = { path = "../agentrs-testkit" }
+bytes = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt"] }
 
 [lints]
 workspace = true

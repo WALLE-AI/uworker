@@ -158,15 +158,23 @@ async fn 跑(
     let persistence = Arc::new(FakePersistence::new());
     let deps = EngineDeps {
         persistence: persistence.clone() as Arc<dyn RunPersistence>,
+        event_sink: None,
         clock: Arc::new(FakeClock::new(0)),
         driver: driver.clone(),
         admission: Arc::new(AdmitAll),
         tools: None,
+        context: None,
+        components: None,
     };
 
     let host = RuntimeHost::new();
+    // 本文件验证的是**已授权目录**的缓存语义；未授权注册项被过滤由 host 单测覆盖。
+    let allowed = tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
+    let mut spec = 规格(mode, 提示);
+    spec.authority.tools = allowed.clone();
+    spec.initial_capabilities.tools = allowed;
     let started = host
-        .start_with_tools(规格(mode, 提示), deps, TurnGuards::default(), tools)
+        .start_with_tools(spec, deps, TurnGuards::default(), tools)
         .await
         .expect("启动失败");
 

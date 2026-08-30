@@ -336,7 +336,11 @@ mod tests {
                     request_id: "req1".into(),
                 },
             ),
-            事件(2, EventPayload::TextDelta, Durability::LiveStream),
+            事件(
+                2,
+                EventPayload::TextDelta { text: "x".into() },
+                Durability::LiveStream,
+            ),
         ];
         assert_eq!(
             plan(&ev),

@@ -156,6 +156,7 @@ async fn 跑一次(mode: PermissionMode, first: Vec<LlmEvent>) -> (Arc<录制驱
 
     let deps = EngineDeps {
         persistence: persistence.clone() as Arc<dyn RunPersistence>,
+        event_sink: None,
         clock: Arc::new(FixedClock(Timestamp(0))),
         driver: driver.clone(),
         admission: Arc::new(AdmitAll),
@@ -163,6 +164,8 @@ async fn 跑一次(mode: PermissionMode, first: Vec<LlmEvent>) -> (Arc<录制驱
             Arc::new(FakePolicy::allow_all()) as Arc<dyn PolicyEnforcer>,
             sandbox.clone() as Arc<dyn SandboxExecutor>,
         ))),
+        context: None,
+        components: None,
     };
 
     let host = RuntimeHost::new();
@@ -224,6 +227,7 @@ async fn plan_模式的拒绝码是_permission_mode() {
 
     let deps = EngineDeps {
         persistence: persistence.clone() as Arc<dyn RunPersistence>,
+        event_sink: None,
         clock: Arc::new(FixedClock(Timestamp(0))),
         driver,
         admission: Arc::new(AdmitAll),
@@ -231,6 +235,8 @@ async fn plan_模式的拒绝码是_permission_mode() {
             Arc::new(FakePolicy::allow_all()) as Arc<dyn PolicyEnforcer>,
             sandbox.clone() as Arc<dyn SandboxExecutor>,
         ))),
+        context: None,
+        components: None,
     };
 
     let host = RuntimeHost::new();
@@ -290,6 +296,7 @@ async fn 终态摘要带回最后一条助手文本() {
     let sandbox = Arc::new(FakeSandbox::new());
     let deps = EngineDeps {
         persistence: Arc::new(FakePersistence::new()) as Arc<dyn RunPersistence>,
+        event_sink: None,
         clock: Arc::new(FixedClock(Timestamp(0))),
         driver,
         admission: Arc::new(AdmitAll),
@@ -297,6 +304,8 @@ async fn 终态摘要带回最后一条助手文本() {
             Arc::new(FakePolicy::allow_all()) as Arc<dyn PolicyEnforcer>,
             sandbox as Arc<dyn SandboxExecutor>,
         ))),
+        context: None,
+        components: None,
     };
     let host = RuntimeHost::new();
     let started = host
