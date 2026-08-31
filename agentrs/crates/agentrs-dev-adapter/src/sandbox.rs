@@ -44,6 +44,19 @@ struct State {
     overlay: HashMap<(String, PathBuf), Overlay>,
 }
 
+/// 一条待提交的改动，连同它替换掉的盘上内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChange {
+    /// 绝对路径。
+    pub path: PathBuf,
+    /// 相对工作区根的路径，给人看的。
+    pub relative: String,
+    /// 盘上现有的内容；文件不存在（新建）时为 `None`。
+    pub on_disk: Option<String>,
+    /// 暂存的内容；这是一次删除时为 `None`。
+    pub staged: Option<String>,
+}
+
 /// overlay 里的一条改动。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Overlay {
@@ -218,6 +231,41 @@ impl LocalFileSandbox {
             .overlay
             .retain(|(cs, _), _| cs != change_set);
         Ok(pending.len())
+    }
+
+    /// 某个 ChangeSet 里待提交的每一条改动：路径、暂存后的内容、盘上的旧内容。
+    ///
+    /// 宿主用它在提交**之前**把改动摆给人看。删除的 `staged` 为 `None`，
+    /// 新建文件的 `on_disk` 为 `None`——两者都不是"空文件"，把它们并成空串会
+    /// 让新建看起来像清空、删除看起来像没变。
+    pub fn pending_entries(&self, change_set: &str) -> Vec<PendingChange> {
+        let staged: Vec<(PathBuf, Overlay)> = {
+            let s = self.state.lock().unwrap();
+            let mut out: Vec<(PathBuf, Overlay)> = s
+                .overlay
+                .iter()
+                .filter(|((cs, _), _)| cs == change_set)
+                .map(|((_, p), v)| (p.clone(), v.clone()))
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        staged
+            .into_iter()
+            .map(|(path, overlay)| PendingChange {
+                relative: path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+                on_disk: std::fs::read_to_string(&path).ok(),
+                staged: match overlay {
+                    Overlay::Content(text) => Some(text),
+                    Overlay::Tombstone => None,
+                },
+                path,
+            })
+            .collect()
     }
 
     /// 当前 overlay 中待提交的条目数。
@@ -498,6 +546,47 @@ impl LocalFileSandbox {
     pub fn read_text(&self, change_set: &str, rel: &str) -> Option<String> {
         let p = self.resolve(rel)?;
         self.read(change_set, &p).ok()
+    }
+}
+
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+
+    #[test]
+    fn 待提交的改动带着它替换掉的旧内容() {
+        let dir = tempdir::TempDir::new("agentrs-pending").unwrap();
+        std::fs::write(dir.path().join("kept.md"), "old\n").unwrap();
+        std::fs::write(dir.path().join("gone.md"), "bye\n").unwrap();
+        let sb = LocalFileSandbox::new(dir.path()).unwrap();
+
+        assert!(sb.pending_entries("cs").is_empty());
+
+        let root = dir.path().canonicalize().unwrap();
+        sb.write("cs", &root.join("kept.md"), "new\n".into());
+        sb.write("cs", &root.join("fresh.md"), "hello\n".into());
+        sb.delete("cs", &root.join("gone.md"));
+
+        let entries = sb.pending_entries("cs");
+        assert_eq!(entries.len(), 3);
+        let by_name = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.relative == name)
+                .unwrap_or_else(|| panic!("{name} is missing"))
+        };
+        // 改：两边都有。
+        assert_eq!(by_name("kept.md").on_disk.as_deref(), Some("old\n"));
+        assert_eq!(by_name("kept.md").staged.as_deref(), Some("new\n"));
+        // 新建：盘上没有——这不是"空文件"，并成空串会让新建看起来像清空。
+        assert_eq!(by_name("fresh.md").on_disk, None);
+        assert_eq!(by_name("fresh.md").staged.as_deref(), Some("hello\n"));
+        // 删除：暂存侧没有。
+        assert_eq!(by_name("gone.md").on_disk.as_deref(), Some("bye\n"));
+        assert_eq!(by_name("gone.md").staged, None);
+        // 另一个 ChangeSet 看不到这些。
+        assert!(sb.pending_entries("other").is_empty());
     }
 }
 

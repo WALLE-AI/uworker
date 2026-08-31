@@ -485,7 +485,7 @@ pub fn payload_kind(p: &EventPayload) -> &'static str {
         EventPayload::AssistantMessage => "AssistantMessage",
         EventPayload::SurfaceMessageRecorded { .. } => "SurfaceMessageRecorded",
         EventPayload::TextDelta { .. } => "TextDelta",
-        EventPayload::ThinkingDelta => "ThinkingDelta",
+        EventPayload::ThinkingDelta { .. } => "ThinkingDelta",
         EventPayload::UsageUpdated => "UsageUpdated",
         EventPayload::ToolProposed { .. } => "ToolProposed",
         EventPayload::HookOutcomeRecorded { .. } => "HookOutcomeRecorded",

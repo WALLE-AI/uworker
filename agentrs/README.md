@@ -35,6 +35,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 工具审批、ChangeSet 和 durable replay。它使用 `agentrs-dev-adapter` 的 L0 基础围栏，
 不是 AgentUI，也不是生产 SandboxRS。
 
+界面与键盘模型自 **dsh-code-agent**（MIT）逐模块移植，见
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
 ```sh
 export AGENTRS_BASE_URL=https://api.siliconflow.cn/v1
 export AGENTRS_API_KEY=...                 # 只通过进程环境注入
@@ -42,17 +45,161 @@ export AGENTRS_MODEL=Pro/deepseek-ai/DeepSeek-R1
 cargo run -p agentrs-dev-tui -- --workspace . "Inspect this workspace"
 ```
 
-读工具自动放行；`Write`、`Edit`、`Delete` 必须在 TUI 中逐次审批。所有写操作先进入
-内存 ChangeSet，运行结束后按 `C` 提交或按 `D` 丢弃。`Ctrl+C` 请求安全取消，再按一次
-强制退出。`--resume <jsonl>` 可以离线重建已提交 transcript。
+命令行：`--workspace` / `--log` / `--resume` / `--permission <plan|default|accepted>` /
+`--no-color`。非法取值在进入 raw mode **之前**报错。
+
+### 读屏
+
+无边框，一列流式转录：
+
+- `> text` —— 你的消息，truecolor 下带底色，方便在成屏工具输出里回找；
+- `● text` —— 助手，流式；助手正文按 markdown 渲染（标题/列表/引用/表格按显示宽度
+  对齐/代码围栏），**语法被消费而不是展示**；
+- `∴ Thinking` —— 模型的推理，默认折叠，`Ctrl+O` 展开。只有端点真的分离出
+  reasoning 才会出现：OpenAI 兼容端点看 `delta.reasoning_content`，Anthropic 族看
+  `thinking` 块。本机两个 vLLM 端点都不分离，在它们上面跑看不到这一行；
+- `▸ / ✓ / ✗ / ⚠ name  [badge]` —— 工具卡：进行中 / 成功 / 失败或拒绝 / 被取消。
+  状态符的颜色取自这次调用**做什么**（读/搜/改/跑/取），失败一律红；
+  badge 携带 `42 lines`、`+12 -4`、拒绝码。卡体挂在 ` ⎿ ` 檐线下；
+- `• text` —— durable 标记（压缩、审批审计、模式变更）；
+- `── turn N` —— 一个 turn 的收尾。
+
+**折叠预算按终端行数算，不按逻辑行数**——一行两万字符的 JSON 在 80 列下占 250 行，
+按"一行"放行就会把整屏挤掉。成功卡 3 行、diff 卡 8 行、未成功或进行中的卡 8 行；
+助手正文**从不因为长而折叠**。`Ctrl+O` 展开。连续三次以上的成功读/搜合并成
+`✓ 8 reads · 2 searches` 一行——只有读和搜会合并，命令输出、diff、失败与进行中的
+调用永不隐藏。
+
+底部依次是：working line（转轮 + 在做什么 + 耗时 + 30 秒后的 token）、通知行
+（按优先级排队、各自过期、`+2` 说明还有几条在等）、上下文压力条、composer、状态行
+（左侧模型/权限/状态/ctx/tools/staged/tok，窄终端**整段丢弃而不折行**，
+权限与模型永不丢；右侧工作区）。
+
+### 键
+
+`?` 打开快捷键表——**表本身就是解析器读的那张表**，重绑定之后两边同时变。
+
+| 键 | 作用 |
+|---|---|
+| `Enter` | 发送；补全打开时先接受补全 |
+| `Alt+Enter` / `Ctrl+J` | 换行 |
+| `←→` `Ctrl+←→` `Alt+B/F` `Ctrl+A/E` | 光标：字符 / 词 / 行首尾 |
+| `Ctrl+W` `Alt+Backspace` `Ctrl+U` `Ctrl+K` | 删词 / 删到行首 / 删到行尾 |
+| `↑↓` | 多行草稿内移动，到头后走草稿历史；补全打开时选候选 |
+| `/` | 草稿开头补全命令；直接回车即执行（见下表） |
+| `@` | 任意位置补全工作区路径；接受目录后光标留在目录里继续打 |
+| `Tab` | 接受补全 |
+| `PgUp/PgDn`、`Alt+↑↓`、滚轮 | 滚动；离开尾部即暂停跟随，状态行报未读数 |
+| `Ctrl+O` | 折叠/展开视野里的卡 |
+| `Ctrl+T` | 全屏可搜索转录：`/` 搜索、`n`/`N` 跳匹配、`r` 恢复到草稿、`q` 关闭 |
+| `Ctrl+P` | 命令面板 |
+| `Ctrl+R` | durable 日志浏览器；`Enter` 重放并续跑（运行中的 run 不会被顶掉） |
+| `Ctrl+X` | 用 `$EDITOR` 打开卡片的第一个文件位置 |
+| `Shift+Tab` | 循环权限模式，**对下一次 run 生效** |
+| `y` / `n` / `1`–`9` / `↑↓`+`Enter` | 审批：选项行，默认停在第一条拒绝行（fail-closed） |
+| `Ctrl+S` | 提交 ChangeSet。丢弃与退出是 `/discard`、`/quit` |
+| `Ctrl+H` / `Backspace` | 删除前一个字符。`stty erase ^H` 的终端发 0x08，crossterm 解成 `ctrl+h` |
+| `Esc` | 先清草稿，无可清时中断当前 run |
+| `Ctrl+C` | 两段式取消，再按一次强制退出 |
+
+**composer 里没有裸字母键。** 曾经 `c`/`d`/`q` 直接是提交/丢弃/退出，于是打
+`commit this` 会先提交再在草稿里留下 `ommit this`，打 `quick` 会直接退出程序——
+一个始终在线的输入框付不起这个代价。审批面板可以用裸 `y`/`n`，因为那时没有草稿可打。
+
+光标是画出来的（当前单元格反显），宽字符落在它自己的起始列。composer 用**硬折行**
+而不是按词折行：只有硬折行满足"折前缀得到的行 = 折全文得到的前缀行"，光标才定得住。
+
+### 命令
+
+`Ctrl+P` 打开面板，或在草稿开头打 `/`（Tab 补全，回车执行）。
+
+| 命令 | 键 | 作用 |
+|---|---|---|
+| `/diff` | `Ctrl+G` | 提交前审阅暂存的改动：逐文件 diff 与 `+N -M` |
+| `/commit` | `Ctrl+S` | 提交本会话开过的**全部** ChangeSet，按打开顺序 |
+| `/discard` | | 丢弃全部暂存 |
+| `/clear` | | 丢掉当前对话开一段新的（有未提交改动时先拦住） |
+| `/retry` | | 把上一条**消息**放回草稿（命令不进历史） |
+| `/cancel` | `Ctrl+C` | 中断进行中的 run |
+| `/permission <preset>` | `Shift+Tab` | 带参数指定 `plan`/`default`/`accepted`，不带参数则循环 |
+| `/status` | | 本次会话是什么：run、日志、模型、端点、计数、暂存、降级状态 |
+| `/logs` | `Ctrl+R` | durable 日志浏览器 |
+| `/transcript` | `Ctrl+T` | 可搜索转录 |
+| `/export <path>` | | 把转录写成 markdown，默认写到日志同名的 `.md` |
+| `/fold` | `Ctrl+O` | 折叠/展开视野里的卡 |
+| `/editor` | `Ctrl+X` | 用 `$EDITOR` 打开卡片的文件 |
+| `/mouse` | | 把滚轮还给终端（拖选、终端自己的复制），或收回来 |
+| `/help` | `?` | 快捷键表 |
+| `/quit` | | 退出（等同 `Ctrl+C` 两下） |
+
+命令与键是**同一张表的两种写法**——面板里每一行都标着对应的键，改了绑定两边一起变。
+一条命令要么有动作，要么不存在（有测试钉着），不会出现"点了没反应"的行。
+
+`Ctrl+C` 与 `Esc` 是**保留键**，不可重绑定也不可解绑。其余可写
+`~/.agentrs/keybindings.json`（`$AGENTRS_HOME` 优先）重绑定：
+
+```json
+{ "palette:open": "ctrl+g", "session:browse": ["ctrl+r", "alt+r"], "help:open": null }
+```
+
+文件里的任何错误都只进通知行然后被忽略，**绝不会让 TUI 起不来**——因为要改它就得先
+进得来。一行坏了不影响其余各行。
+
+### 降级
+
+色深与宽字形从 `TERM`/`COLORTERM`/`NO_COLOR`/`LANG` 探测；truecolor 用哑光十六进制，
+其余用 ANSI 名（尊重用户配色），`NO_COLOR` / `TERM=dumb` / `--no-color` 下不发任何
+SGR。不能画宽字形的终端整套换 ASCII 替身（`> + x ! *`），两套字形都是一格宽，
+所以行预算不受影响。每一处降级都进一条通知，不是静默的。
+
+### 边界
+
+`crates/agentrs-dev-tui/src/host_io.rs` 是本 crate **唯一**触碰 OS 的文件——时钟、
+环境变量、配置文件、目录列举、`$EDITOR`。`scripts/check-no-env.sh` 豁免的是这一个
+文件而不是整个 crate，其余二十来个模块仍受门禁保护，且一律是注入值的纯函数
+（`now_ms` 是参数，从不自己读表），这也是渲染层可以快照测试的原因。
+
+`--resume <jsonl>` 离线重建 transcript。**重建时不显示任何时长与 diff**：
+durable 日志里没有记过这些，凭空补出来就是 UI 冒充内核的事实。
+
+### 多轮对话
+
+内核的 Run 在 inbox 排空后就结束——**Run 不是会话，是一次"把话说完"**。所以运行中
+发消息是 steering（进当前 Step），而 run 结束后再发一句是**新的一轮**：宿主用
+[`fork`](crates/agentrs-runtime/src/fork.rs) 从上一个 Run 派生新 Run，
+`RuntimeHost::start_forked` 把上一轮的 durable 前缀重放成 Surface 再启动。
+
+三条由此而来的性质：
+
+- **每一轮一个日志**：`chat.jsonl` → `chat-2.jsonl` → `chat-3.jsonl`。两个 Run 挤在
+  一个文件里会共用序号计数器，`--resume` 会把一个 Run 的历史读成另一个的。
+- **每个日志自足**：继承来的前缀会写进新 Run 自己的日志（fork 规则 3），所以
+  `--resume chat-3.jsonl` 单独就能重建整段对话。它**不在 live 通道上重播**——
+  那段对话宿主早就显示在屏幕上了，再推一遍就是贴第二份。
+- **ChangeSet 按 Run 分，提交按会话收**：fork 规则 5 说新 Run 不继承任何 live 状态，
+  暂存的写正是 live 状态，所以每一轮开一个新 ChangeSet；但按一次 `c` 必须把这个会话
+  开过的**全部** ChangeSet 按顺序提交，否则用户会以为前几轮的改动一起落了盘。
+
+思考进 durable Surface 并带上签名，因此 `--resume` 能重建它。**要不要发回给模型是
+端点能力说了算**：Anthropic 族要求带签名原样往返，OpenAI 兼容端点不收，
+`legalization` 在装配时按能力剥离。
+
+**已知限制**：跨轮没有读己之写。第二轮 `Read` 一个第一轮暂存过、尚未提交的文件，
+读到的是盘上的旧内容——overlay 按 ChangeSet 隔离，而新 Run 拿的是新 ChangeSet。
+要打通得让宿主能指定 ChangeSet（`RunSpec` 目前没有这个字段），属于契约改动。
 
 支持矩阵：
 
 | 平台 | 构建/单测 | 交互 PTY | 说明 |
 |---|---:|---:|---|
 | Windows 11 / PowerShell | 已验证 | 已验证 | 当前真实 LLM 与终端恢复基线 |
-| Linux | CI 待接入 | 待验证 | Ratatui/Crossterm 代码路径受支持 |
+| Linux | 已验证 | 已验证 | Ratatui/Crossterm 代码路径受支持 |
 | macOS | CI 待接入 | 待验证 | Ratatui/Crossterm 代码路径受支持 |
+
+**没有对应物、因此不做**：向用户提问（AgentRS 无此通道）、todo/plan 面板
+（无 todo 投影，凭空造一个就是 UI 冒充内核）、子 Agent 行（本宿主不派生 ChildRun）、
+会话内切权限（`with_permission_mode` 是引擎构建期的 builder，运行期切换需要内核补
+`UserInput::PermissionMode` 与 turn 边界裁定）、会话内换模型（模型由 `RunSpec` 固定）。
 
 最低 Rust 版本保持 workspace 的 1.85；TUI 固定使用 Ratatui 0.29 和 Crossterm 0.28。
 API key 不进入 TUI state、durable JSONL 或屏幕诊断。
@@ -65,4 +212,5 @@ API key 不进入 TUI state、durable JSONL 或屏幕诊断。
 
 ## 许可
 
-Apache-2.0。部分模块自 aionrs 移植，见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+Apache-2.0。部分模块自 aionrs（Apache-2.0）与 dsh-code-agent（MIT）移植，
+见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

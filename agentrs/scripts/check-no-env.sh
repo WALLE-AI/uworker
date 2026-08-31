@@ -16,8 +16,12 @@ cd "$(dirname "$0")/.."
 patterns='std::fs::|std::process::Command|std::process::abort|tokio::fs::|tokio::process::'
 net_patterns='std::net::|reqwest::'
 
+# agentrs-dev-tui/src/host_io.rs 是第三处豁免，粒度是**单个文件**而不是整个 crate：
+# 交互宿主确实需要时钟、配置文件与 $EDITOR，但把它们收进一个文件之后，
+# crate 里其余二十来个模块仍然受本门禁保护，越界会立刻被照出来。
 if hits=$(grep -rnE "$patterns" crates --include='*.rs' \
         | grep -v '^crates/agentrs-dev-adapter/' \
+        | grep -v '^crates/agentrs-dev-tui/src/host_io.rs' \
         | grep -v '^\s*//'); then
     echo "内核中出现文件/进程依赖（应经 port 注入）："
     echo "$hits"

@@ -67,6 +67,9 @@ pub enum StartError {
 }
 
 struct RecoveryState {
+    /// True when the surface came from another Run and must be written into
+    /// this one's log before anything else happens.
+    inherited: bool,
     surface: Vec<crate::surface::SurfaceNode>,
     last_seq: EventSequence,
     epoch_floor: RunEpoch,
@@ -299,9 +302,101 @@ impl RuntimeHost {
             guards,
             tools,
             Some(RecoveryState {
+                inherited: false,
                 surface,
                 last_seq,
                 epoch_floor,
+            }),
+        )
+        .await
+    }
+
+    /// 启动一个由 [`crate::fork`] 派生的 Run。
+    ///
+    /// [`crate::fork`] 只产出**规格**：新 `RunId`、收窄后的授权、一个指向源 Run
+    /// durable 前缀的 `ConversationSnapshot`。在此之前没有任何公开入口能把它跑
+    /// 起来——`start` 会给出空 Surface（等于丢掉整段对话），`resume_from_events`
+    /// 又要求 `run_id` 相同且源 Run 未终止。于是分叉一直是导出的死代码。
+    ///
+    /// 这个入口补上那一步：按边界重放源 Run 的前缀，重建 Surface，再以新 Run
+    /// 的身份启动。
+    ///
+    /// **不查源 Run 的恢复计划**，这是 fork 规则 5 的直接后果：新 Run 不继承任何
+    /// live 状态。源 Run 停在一个未决审批上时，那个审批**随源 Run 留在原地**——
+    /// 它属于那次已经结束的执行，重新兑现它等于让人为另一件事做过的决定，对这次
+    /// 从未发生过的调用生效。
+    ///
+    /// 三条不变量照旧由 [`crate::fork`] 保证并在此复核：新旧 `RunId` 不同、授权
+    /// 不得扩大、`checkpoint` 必须为空。
+    pub async fn start_forked(
+        &self,
+        spec: RunSpec,
+        source_events: &[RunEventEnvelope],
+        deps: EngineDeps,
+        guards: TurnGuards,
+        tools: Vec<agentrs_types::ToolDef>,
+    ) -> Result<StartedRun, StartError> {
+        let Some(source) = spec.conversation.derived_from.clone() else {
+            return Err(StartError::InvalidReplay(
+                "a forked run must name the run it derives from".into(),
+            ));
+        };
+        if source == spec.run_id {
+            return Err(StartError::InvalidReplay(
+                "a fork must have a new run id".into(),
+            ));
+        }
+        // 规则 5：live 状态一概不继承，checkpoint 里可能挂着未决审批。
+        if spec.checkpoint.is_some() {
+            return Err(StartError::InvalidReplay(
+                "a forked run must not carry a checkpoint".into(),
+            ));
+        }
+        let boundary = spec.conversation.up_to_seq.unwrap_or(EventSequence(u64::MAX));
+        let mut last_seq = EventSequence(0);
+        let prefix: Vec<RunEventEnvelope> = source_events
+            .iter()
+            .filter(|event| event.is_durable())
+            .filter(|event| {
+                event
+                    .seq
+                    .is_some_and(|seq| seq <= boundary && seq > EventSequence(0))
+            })
+            .cloned()
+            .collect();
+        for event in &prefix {
+            if event.run_id != source {
+                return Err(StartError::InvalidReplay(
+                    "fork prefix mixes events from another run".into(),
+                ));
+            }
+            let seq = event.seq.expect("filtered above");
+            if seq <= last_seq {
+                return Err(StartError::InvalidReplay(
+                    "event sequence is not strictly increasing".into(),
+                ));
+            }
+            last_seq = seq;
+        }
+        let surface = crate::surface::from_events(&prefix)
+            .map_err(|_| StartError::InvalidReplay("surface message is malformed".into()))?;
+        if surface.is_empty() {
+            return Err(StartError::InvalidReplay(
+                "fork prefix carries no conversation to continue".into(),
+            ));
+        }
+        // 新 Run 的日志是空的：它自己的序号从头开始，epoch 也是。源 Run 的序号
+        // 不能顺延过来——两条日志各自单调，混用会让恢复读出一段自相矛盾的历史。
+        self.launch(
+            spec,
+            deps,
+            guards,
+            tools,
+            Some(RecoveryState {
+                inherited: true,
+                surface,
+                last_seq: EventSequence(0),
+                epoch_floor: RunEpoch(0),
             }),
         )
         .await
@@ -367,7 +462,11 @@ impl RuntimeHost {
         // 必须在 with_tools 之后：它要在**完整**目录上做投影。
         .with_permission_mode(spec.permission_mode.clone());
         if let Some(state) = recovery {
-            engine = engine.with_recovery_state(state.surface, state.last_seq);
+            engine = if state.inherited {
+                engine.with_inherited_surface(state.surface)
+            } else {
+                engine.with_recovery_state(state.surface, state.last_seq)
+            };
         }
 
         let handle = RunHandle {
@@ -837,6 +936,453 @@ mod tests {
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["Read"]
+        );
+    }
+
+    #[tokio::test]
+    async fn 思考进入_surface_而不是被丢掉() {
+        // provider 解析出了 reasoning，`legalization` 也准备好按端点能力剥离它，
+        // 中间这一段却什么都没做——于是推理模型的思考链在内核里蒸发：屏幕上没有，
+        // 下一次请求里也没有。
+        use std::sync::Mutex as StdMutex;
+
+        use agentrs_contracts::event::EventPayload;
+        use agentrs_types::{Message, Role};
+
+        struct 两轮(Arc<StdMutex<Vec<LlmRequest>>>);
+        #[async_trait::async_trait]
+        impl StepDriver for 两轮 {
+            async fn call(&self, request: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                let first = self.0.lock().unwrap().is_empty();
+                self.0.lock().unwrap().push(request);
+                if first {
+                    Ok(vec![
+                        LlmEvent::ThinkingDelta("先看单位".into()),
+                        LlmEvent::ThinkingDelta("，再算".into()),
+                        LlmEvent::ThinkingSignature("sig-1".into()),
+                        LlmEvent::TextDelta("是 25".into()),
+                        LlmEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            usage: TokenUsage::default(),
+                        },
+                    ])
+                } else {
+                    Ok(vec![LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    }])
+                }
+            }
+        }
+
+        let host = RuntimeHost::new();
+        let persistence = Arc::new(agentrs_testkit::FakePersistence::new());
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let deps = EngineDeps {
+            persistence: persistence.clone(),
+            event_sink: None,
+            clock: Arc::new(FixedClock(Timestamp(0))),
+            driver: Arc::new(两轮(seen.clone())),
+            admission: Arc::new(AdmitAll),
+            tools: None,
+            context: None,
+            components: None,
+        };
+        let run = host
+            .start(规格("r-think", SpecVersion(1)), deps, TurnGuards::default())
+            .await
+            .unwrap();
+        run.handle
+            .submit(UserInput::Message(vec![ContentBlock::text("3²+4²")]))
+            .await
+            .unwrap();
+        run.handle
+            .submit(UserInput::Message(vec![ContentBlock::text("再说一次")]))
+            .await
+            .unwrap();
+        run.driver.await;
+
+        // 1. 思考进了 durable Surface，带着它的签名。
+        let blocks: Vec<ContentBlock> = persistence
+            .events()
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::SurfaceMessageRecorded { message } => {
+                    serde_json::from_value::<Message>(message.clone()).ok()
+                }
+                _ => None,
+            })
+            .filter(|message| message.role == Role::Assistant)
+            .flat_map(|message| message.content.into_iter())
+            .collect();
+        assert!(
+            matches!(
+                blocks.first(),
+                Some(ContentBlock::Thinking { thinking, signature })
+                    if thinking == "先看单位，再算" && signature.as_deref() == Some("sig-1")
+            ),
+            "{blocks:?}"
+        );
+        // 2. 顺序：思考在正文之前。Anthropic 族顺序错了直接 400。
+        assert!(matches!(blocks.get(1), Some(ContentBlock::Text { .. })), "{blocks:?}");
+
+        // 3. 记下来之后，**要不要发回去是端点能力说了算**，不是内核。
+        //    默认的 OpenAI 兼容端点不收 thinking 块，`legalization` 在装配时把它
+        //    剥掉——这正是那段代码写来干的事，而在此之前它一行都跑不到，因为
+        //    从来没有人造出过一个 Thinking 块。Anthropic 族保留并要求签名往返，
+        //    见 `provider::legalization` 自己的测试。
+        let requests = seen.lock().unwrap();
+        let second = requests.last().expect("两次请求");
+        assert!(
+            !second
+                .messages
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .any(|block| matches!(block, ContentBlock::Thinking { .. })),
+            "OpenAI 兼容端点不该收到 thinking 块"
+        );
+    }
+
+    #[tokio::test]
+    async fn 分叉出的_run_带着整段对话启动() {
+        use std::sync::Mutex as StdMutex;
+
+        use agentrs_contracts::event::{Causality, Durability, EventPayload, Visibility};
+        use agentrs_contracts::ids::EventId;
+        use agentrs_contracts::spec::ForkSpec;
+        use agentrs_contracts::surface::{SurfaceEventKind, SurfaceMarker, SurfaceOp};
+        use agentrs_types::{Message, Role};
+
+        struct Capture(Arc<StdMutex<Option<LlmRequest>>>);
+        #[async_trait::async_trait]
+        impl StepDriver for Capture {
+            async fn call(&self, request: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                *self.0.lock().unwrap() = Some(request);
+                Ok(vec![LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                }])
+            }
+        }
+
+        fn 源事件(seq: u64, role: Role, text: &str) -> RunEventEnvelope {
+            RunEventEnvelope {
+                run_id: "r-src".into(),
+                epoch: RunEpoch(1),
+                event_id: EventId::new(format!("e{seq}")),
+                seq: Some(EventSequence(seq)),
+                live_seq: None,
+                at: Timestamp(0),
+                durability: Durability::DurableFact,
+                visibility: Visibility::User,
+                causality: Causality::default(),
+                surface: Some(SurfaceMarker {
+                    kind: SurfaceEventKind::AssistantMessage,
+                    op: SurfaceOp::Append,
+                }),
+                payload: EventPayload::SurfaceMessageRecorded {
+                    message: serde_json::to_value(Message::new(
+                        role,
+                        vec![ContentBlock::text(text)],
+                    ))
+                    .unwrap(),
+                },
+            }
+        }
+
+        let events = vec![
+            源事件(1, Role::User, "第一轮问题"),
+            源事件(2, Role::Assistant, "第一轮回答"),
+        ];
+        let source_spec = 规格("r-src", SpecVersion(1));
+        let forked = crate::fork(
+            &ForkSpec {
+                source_run_id: "r-src".into(),
+                new_run_id: "r-next".into(),
+                boundary: None,
+            },
+            &events,
+            &source_spec,
+            None,
+            source_spec.authority.clone(),
+        )
+        .unwrap();
+
+        let host = RuntimeHost::new();
+        let captured = Arc::new(StdMutex::new(None));
+        let deps = EngineDeps {
+            persistence: Arc::new(agentrs_testkit::FakePersistence::new()),
+            event_sink: None,
+            clock: Arc::new(FixedClock(Timestamp(0))),
+            driver: Arc::new(Capture(captured.clone())),
+            admission: Arc::new(AdmitAll),
+            tools: None,
+            context: None,
+            components: None,
+        };
+        let run = host
+            .start_forked(forked.spec, &events, deps, TurnGuards::default(), vec![])
+            .await
+            .unwrap();
+        run.handle
+            .submit(UserInput::Message(vec![ContentBlock::text("第二轮问题")]))
+            .await
+            .unwrap();
+        run.driver.await;
+
+        // 这是分叉存在的全部意义：新 Run 的第一次请求里带着上一轮的对话，
+        // 而不是从空白开始。
+        let request = captured.lock().unwrap().take().unwrap();
+        let 正文: Vec<String> = request
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(正文, vec!["第一轮问题", "第一轮回答", "第二轮问题"]);
+    }
+
+    #[tokio::test]
+    async fn 分叉把继承来的前缀写进新_run_自己的日志() {
+        // fork 规则 3：新 Run 自带完整可重建前缀。只把历史塞进内存 Surface，
+        // 模型看得见而日志里没有，`--resume` 会重建出一段缺了开头的对话——
+        // 而多轮对话每一轮都分叉一次，第三轮就会把第一轮丢掉。
+        use agentrs_contracts::event::{Causality, Durability, EventPayload, Visibility};
+        use agentrs_contracts::ids::EventId;
+        use agentrs_contracts::spec::ForkSpec;
+        use agentrs_contracts::surface::{SurfaceEventKind, SurfaceMarker, SurfaceOp};
+        use agentrs_types::{Message, Role};
+
+        fn 源事件(seq: u64, role: Role, text: &str) -> RunEventEnvelope {
+            RunEventEnvelope {
+                run_id: "r-src".into(),
+                epoch: RunEpoch(1),
+                event_id: EventId::new(format!("e{seq}")),
+                seq: Some(EventSequence(seq)),
+                live_seq: None,
+                at: Timestamp(0),
+                durability: Durability::DurableFact,
+                visibility: Visibility::User,
+                causality: Causality::default(),
+                surface: Some(SurfaceMarker {
+                    kind: SurfaceEventKind::AssistantMessage,
+                    op: SurfaceOp::Append,
+                }),
+                payload: EventPayload::SurfaceMessageRecorded {
+                    message: serde_json::to_value(Message::new(
+                        role,
+                        vec![ContentBlock::text(text)],
+                    ))
+                    .unwrap(),
+                },
+            }
+        }
+
+        let events = vec![
+            源事件(1, Role::User, "第一轮问题"),
+            源事件(2, Role::Assistant, "第一轮回答"),
+        ];
+        let source_spec = 规格("r-src", SpecVersion(1));
+        let forked = crate::fork(
+            &ForkSpec {
+                source_run_id: "r-src".into(),
+                new_run_id: "r-next".into(),
+                boundary: None,
+            },
+            &events,
+            &source_spec,
+            None,
+            source_spec.authority.clone(),
+        )
+        .unwrap();
+
+        let host = RuntimeHost::new();
+        let persistence = Arc::new(agentrs_testkit::FakePersistence::new());
+        let run = host
+            .start_forked(
+                forked.spec,
+                &events,
+                依赖(persistence.clone()),
+                TurnGuards::default(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        run.handle
+            .submit(UserInput::Message(vec![ContentBlock::text("第二轮问题")]))
+            .await
+            .unwrap();
+        run.driver.await;
+
+        let 正文: Vec<String> = persistence
+            .events()
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::SurfaceMessageRecorded { message } => {
+                    serde_json::from_value::<Message>(message.clone()).ok()
+                }
+                _ => None,
+            })
+            .flat_map(|message| message.content.into_iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        // 新 Run 的日志里三条都在，所以它单独重放就能重建整段对话。
+        assert_eq!(
+            正文,
+            vec!["第一轮问题", "第一轮回答", "第二轮问题", "ok"]
+        );
+    }
+
+    #[tokio::test]
+    async fn 继承来的前缀不在_live_通道上重播一次() {
+        // 它落进日志是为了让新 Run 自足；再广播一次就是把宿主早已显示在屏幕上的
+        // 那段对话贴第二份。恢复也是这么做的：重建 Surface 不重播事件。
+        use agentrs_contracts::event::{Causality, Durability, EventPayload, Visibility};
+        use agentrs_contracts::ids::EventId;
+        use agentrs_contracts::spec::ForkSpec;
+        use agentrs_contracts::surface::{SurfaceEventKind, SurfaceMarker, SurfaceOp};
+        use agentrs_types::{Message, Role};
+
+        let events: Vec<RunEventEnvelope> = [(1u64, Role::User, "第一轮问题"), (2, Role::Assistant, "第一轮回答")]
+            .into_iter()
+            .map(|(seq, role, text)| RunEventEnvelope {
+                run_id: "r-src".into(),
+                epoch: RunEpoch(1),
+                event_id: EventId::new(format!("e{seq}")),
+                seq: Some(EventSequence(seq)),
+                live_seq: None,
+                at: Timestamp(0),
+                durability: Durability::DurableFact,
+                visibility: Visibility::User,
+                causality: Causality::default(),
+                surface: Some(SurfaceMarker {
+                    kind: SurfaceEventKind::AssistantMessage,
+                    op: SurfaceOp::Append,
+                }),
+                payload: EventPayload::SurfaceMessageRecorded {
+                    message: serde_json::to_value(Message::new(role, vec![ContentBlock::text(text)]))
+                        .unwrap(),
+                },
+            })
+            .collect();
+        let source_spec = 规格("r-src", SpecVersion(1));
+        let forked = crate::fork(
+            &ForkSpec {
+                source_run_id: "r-src".into(),
+                new_run_id: "r-next".into(),
+                boundary: None,
+            },
+            &events,
+            &source_spec,
+            None,
+            source_spec.authority.clone(),
+        )
+        .unwrap();
+
+        #[derive(Default)]
+        struct 记录 (std::sync::Mutex<Vec<RunEventEnvelope>>);
+        #[async_trait::async_trait]
+        impl agentrs_contracts::ports::RunEventSink for 记录 {
+            async fn publish(
+                &self,
+                event: RunEventEnvelope,
+            ) -> Result<(), agentrs_contracts::ports::EventSinkError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        let sink = Arc::new(记录::default());
+        let mut deps = 依赖(Arc::new(agentrs_testkit::FakePersistence::new()));
+        deps.event_sink = Some(sink.clone());
+        let host = RuntimeHost::new();
+        let run = host
+            .start_forked(forked.spec, &events, deps, TurnGuards::default(), vec![])
+            .await
+            .unwrap();
+        run.handle
+            .submit(UserInput::Message(vec![ContentBlock::text("第二轮问题")]))
+            .await
+            .unwrap();
+        run.driver.await;
+
+        let 广播: Vec<String> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::SurfaceMessageRecorded { message } => {
+                    serde_json::from_value::<Message>(message.clone()).ok()
+                }
+                _ => None,
+            })
+            .flat_map(|message| message.content.into_iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(广播, vec!["第二轮问题", "ok"], "只广播这一轮说的话");
+    }
+
+    #[tokio::test]
+    async fn 分叉拒绝没有对话可继续的前缀() {
+        let host = RuntimeHost::new();
+        let mut spec = 规格("r-next", SpecVersion(1));
+        spec.conversation = ConversationSnapshot {
+            derived_from: Some("r-src".into()),
+            up_to_seq: Some(EventSequence(9)),
+        };
+        let error = host
+            .start_forked(
+                spec,
+                &[],
+                依赖(Arc::new(agentrs_testkit::FakePersistence::new())),
+                TurnGuards::default(),
+                vec![],
+            )
+            .await
+            .err();
+        assert!(
+            matches!(error, Some(StartError::InvalidReplay(ref why)) if why.contains("no conversation")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 分叉不接受源_run_的_checkpoint() {
+        // 规则 5：checkpoint 里可能挂着未决审批，那属于已经结束的那次执行。
+        let host = RuntimeHost::new();
+        let mut spec = 规格("r-next", SpecVersion(1));
+        spec.conversation = ConversationSnapshot {
+            derived_from: Some("r-src".into()),
+            up_to_seq: Some(EventSequence(1)),
+        };
+        spec.checkpoint = Some(RunCheckpoint {
+            spec_version: SpecVersion(1),
+            up_to_seq: EventSequence(1),
+            pending_approval: None,
+        });
+        let error = host
+            .start_forked(
+                spec,
+                &[],
+                依赖(Arc::new(agentrs_testkit::FakePersistence::new())),
+                TurnGuards::default(),
+                vec![],
+            )
+            .await
+            .err();
+        assert!(
+            matches!(error, Some(StartError::InvalidReplay(ref why)) if why.contains("checkpoint")),
+            "{error:?}"
         );
     }
 

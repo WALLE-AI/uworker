@@ -175,7 +175,11 @@ pub enum EventPayload {
         text: String,
     },
     /// 思考增量（live，可丢）。
-    ThinkingDelta,
+    ThinkingDelta {
+        /// 可直接展示的思考片段。旧版本 unit 事件反序列化为空片段。
+        #[serde(default)]
+        text: String,
+    },
     /// 用量更新。
     UsageUpdated,
 

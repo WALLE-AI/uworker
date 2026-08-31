@@ -256,6 +256,13 @@ struct Progress {
 #[derive(Default)]
 struct LlmResponseState {
     text: String,
+    /// 本次响应的思考正文。**必须进 Surface**：Anthropic 族要求带签名的
+    /// thinking 块原样往返，否则下一次请求 400；而对不接受它的端点，
+    /// `legalization` 会在装配时按 provider 能力剥掉——那是记录之后的投影决定，
+    /// 与"记没记"是两件事。
+    thinking: String,
+    /// provider 侧的不透明签名，有生命周期。
+    thinking_signature: Option<String>,
     tool_calls: usize,
     stop: Option<StopReason>,
     partial_recorded: bool,
@@ -293,6 +300,13 @@ pub struct Engine {
     /// 已追加的 Surface 节点。请求**只从这里投影**，
     /// 这样"模型可见即已记录"才是可验证的（见 `invariant`）。
     surface: Mutex<Vec<crate::surface::SurfaceNode>>,
+    /// 分叉继承来的前缀，**尚未记入本 Run 的日志**。
+    ///
+    /// 它在 `RunStarted` 之后被逐条 `record_surface` 写进来，于是新 Run 的日志
+    /// 自带完整可重建前缀（fork 规则 3）。只把它塞进 `surface` 是不够的：那样
+    /// 模型看得见、日志里却没有，`--resume` 会重建出一段缺了开头的对话，而
+    /// "模型可见即已记录"这条不变量正是用来禁止这种状态的。
+    inherited: Mutex<Vec<crate::surface::SurfaceNode>>,
     invariants: crate::invariant::Invariants,
     workspace_id: String,
     change_set_id: agentrs_contracts::ids::ChangeSetId,
@@ -339,6 +353,7 @@ impl Engine {
             live_seq: std::sync::atomic::AtomicU64::new(0),
             last_durable_seq: std::sync::atomic::AtomicU64::new(0),
             surface: Mutex::new(Vec::new()),
+            inherited: Mutex::new(Vec::new()),
             invariants: crate::invariant::Invariants::default(),
             workspace_id: "default".into(),
             change_set_id: "cs-default".into(),
@@ -437,6 +452,17 @@ impl Engine {
     }
 
     /// Restore the durable Surface projection and sequence cursor.
+    /// 装入分叉继承的前缀。
+    ///
+    /// 与 [`Self::with_recovery_state`] 的区别是**它会被写进本 Run 的日志**：
+    /// 恢复重放的是同一个 Run 自己的历史，日志里本来就有；分叉来的历史在另一个
+    /// Run 的日志里，不搬过来这条日志就不自足。
+    pub fn with_inherited_surface(mut self, nodes: Vec<crate::surface::SurfaceNode>) -> Self {
+        self.inherited = Mutex::new(nodes);
+        self
+    }
+
+    /// Restore the durable Surface projection and sequence cursor.
     pub fn with_recovery_state(
         mut self,
         surface: Vec<crate::surface::SurfaceNode>,
@@ -504,6 +530,33 @@ impl Engine {
         message: agentrs_types::Message,
         causality: Causality,
     ) -> Result<(), PersistError> {
+        self.record_surface_inner(kind, op, message, causality, true).await
+    }
+
+    /// Record a Surface node without announcing it on the live channel.
+    ///
+    /// 只有分叉继承的前缀走这条路。它必须落进日志（fork 规则 3：新 Run 自带
+    /// 完整可重建前缀），但**不该再广播一次**——那段历史宿主早就见过并且正显示
+    /// 在屏幕上，再推一遍就是把同一段对话贴第二份。恢复也是这么做的：
+    /// `resume_from_events` 重建 Surface 时同样不重播事件。
+    async fn record_inherited_surface(
+        &self,
+        kind: agentrs_contracts::surface::SurfaceEventKind,
+        op: agentrs_contracts::surface::SurfaceOp,
+        message: agentrs_types::Message,
+        causality: Causality,
+    ) -> Result<(), PersistError> {
+        self.record_surface_inner(kind, op, message, causality, false).await
+    }
+
+    async fn record_surface_inner(
+        &self,
+        kind: agentrs_contracts::surface::SurfaceEventKind,
+        op: agentrs_contracts::surface::SurfaceOp,
+        message: agentrs_types::Message,
+        causality: Causality,
+        publish: bool,
+    ) -> Result<(), PersistError> {
         let mut event = RunEventEnvelope {
             run_id: self.run_id.clone(),
             epoch: self.epoch,
@@ -525,8 +578,10 @@ impl Engine {
             .append_event(self.epoch, event.clone())
             .await?;
         event.seq = Some(seq);
-        if let Some(sink) = &self.deps.event_sink {
-            let _ = sink.publish(event).await;
+        if publish {
+            if let Some(sink) = &self.deps.event_sink {
+                let _ = sink.publish(event).await;
+            }
         }
         self.last_durable_seq
             .store(seq.0, std::sync::atomic::Ordering::SeqCst);
@@ -648,6 +703,18 @@ impl Engine {
             .await
         {
             return self.abort(e, st).await;
+        }
+
+        // 继承来的前缀先落进本 Run 的日志，再开始第一个 Turn。顺序是重点：
+        // 它必须在任何模型请求之前完成，否则"模型可见即已记录"会有一个窗口不成立。
+        let inherited = std::mem::take(&mut *self.inherited.lock().await);
+        for node in inherited {
+            if let Err(e) = self
+                .record_inherited_surface(node.kind, node.op, node.message, Causality::default())
+                .await
+            {
+                return self.abort(e, st).await;
+            }
         }
 
         loop {
@@ -1075,6 +1142,8 @@ impl Engine {
 
         let LlmResponseState {
             text,
+            thinking,
+            thinking_signature,
             tool_calls,
             stop,
             proposed,
@@ -1094,8 +1163,16 @@ impl Engine {
                 .saturating_add(request_usage.cache_read_tokens);
         }
 
-        if !text.is_empty() || !proposed.is_empty() {
+        if !text.is_empty() || !proposed.is_empty() || !thinking.is_empty() {
             let mut blocks: Vec<agentrs_types::ContentBlock> = Vec::new();
+            // 思考在前。这不是审美：Anthropic 族要求 thinking 块位于同一条助手
+            // 消息的最前面，顺序错了直接 400。
+            if !thinking.is_empty() {
+                blocks.push(agentrs_types::ContentBlock::Thinking {
+                    thinking: thinking.clone(),
+                    signature: thinking_signature.clone(),
+                });
+            }
             if !text.is_empty() {
                 blocks.push(agentrs_types::ContentBlock::text(&text));
             }
@@ -1159,6 +1236,18 @@ impl Engine {
                     tool_name: name,
                     arguments: input,
                 });
+            }
+            LlmEvent::ThinkingDelta(text) => {
+                response.thinking.push_str(&text);
+                self.emit(
+                    EventPayload::ThinkingDelta { text },
+                    Durability::LiveStream,
+                    causality.clone(),
+                )
+                .await?;
+            }
+            LlmEvent::ThinkingSignature(signature) => {
+                response.thinking_signature = Some(signature);
             }
             LlmEvent::Usage(usage) => response.usage = usage,
             LlmEvent::Done { stop_reason, usage } => {

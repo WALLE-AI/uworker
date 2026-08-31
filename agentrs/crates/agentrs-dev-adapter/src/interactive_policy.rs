@@ -49,8 +49,19 @@ pub struct InteractiveDevPolicy {
     wait_limit: Duration,
     next_grant: AtomicU64,
     next_token: AtomicU64,
+    /// 本进程内该策略实例的序号，用来给 grant id 加前缀。
+    ///
+    /// 一个 Sandbox 会被不止一个策略实例用到——多轮对话里每一轮是一个新 Run，
+    /// 新 Run 配新策略，而 ChangeSet 与 overlay 必须跨轮留在同一个 Sandbox 上。
+    /// 光靠实例内计数器，第二轮的第一个 grant 又叫 `-1`，撞上第一轮已经消费掉的
+    /// 那个，H1 的一次性台账会把它判成 `GrantAlreadyConsumed`——**拒绝是对的**，
+    /// 错的是发号的人重复了号。
+    instance: u64,
     pending: Mutex<HashMap<ApprovalToken, ApprovalRequest>>,
 }
+
+/// 进程内策略实例计数器。
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 impl InteractiveDevPolicy {
     /// 构造测试策略。两个工具集合不得重叠；未列出的工具一律拒绝。
@@ -84,13 +95,14 @@ impl InteractiveDevPolicy {
             wait_limit,
             next_grant: AtomicU64::new(0),
             next_token: AtomicU64::new(0),
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::SeqCst),
             pending: Mutex::new(HashMap::new()),
         })
     }
 
     fn grant(&self, proposal: &ToolProposal) -> (SandboxGrant, Timestamp) {
         let n = self.next_grant.fetch_add(1, Ordering::SeqCst) + 1;
-        let grant_id = format!("dev-tui-grant-{n}");
+        let grant_id = format!("dev-tui-grant-{}-{n}", self.instance);
         let expires_at = Timestamp(self.now.0 + 5 * 60 * 1000);
         self.sandbox
             .issue_grant(&grant_id, proposal.input_hash.clone(), expires_at);
@@ -241,6 +253,33 @@ mod tests {
             InteractiveDevPolicy::new(sandbox, ["Read"], ["Write"], tx, Timestamp(0), wait).unwrap(),
         );
         (policy, rx, dir)
+    }
+
+    #[tokio::test]
+    async fn 共用一个_sandbox_的两个策略不会发出同一个_grant_id() {
+        // 多轮对话就是这个形状：每一轮一个新 Run、一个新策略，而 ChangeSet 与
+        // overlay 必须留在同一个 Sandbox 上。号重了，第二轮的第一次写会被 H1
+        // 的一次性台账判成 GrantAlreadyConsumed。
+        let dir = tempdir::TempDir::new("agentrs-grant-ids").unwrap();
+        let sandbox = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..3 {
+            let (tx, _rx) = mpsc::channel(4);
+            let policy = InteractiveDevPolicy::new(
+                sandbox.clone(),
+                ["Read"],
+                ["Write"],
+                tx,
+                Timestamp(0),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            for _ in 0..2 {
+                let (grant, _) = policy.grant(&proposal("Write"));
+                assert!(ids.insert(grant.grant_id.clone()), "重复的 grant id: {}", grant.grant_id);
+            }
+        }
+        assert_eq!(ids.len(), 6);
     }
 
     #[tokio::test]

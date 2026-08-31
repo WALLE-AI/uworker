@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+
+# agentrs-tui 的默认日志落点（不给 --log 时）。
+.agentrs/
