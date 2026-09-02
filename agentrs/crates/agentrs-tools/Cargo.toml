@@ -1,29 +1,28 @@
 [package]
 name = "agentrs-tools"
+description = "Built-in agent tools for agentrs (Read, Write, Edit, ExecCommand, Grep, Glob, Spawn)"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
-description = "AgentRS: 内置工具的声明与语义、注册目录、描述 lint、MCP 目录映射"
+repository.workspace = true
 
 [dependencies]
-agentrs-contracts = { workspace = true }
-agentrs-types = { workspace = true }
-# 命令输出的无损清洗（去 ANSI、折叠回车覆盖）。context 只依赖 contracts/types，
-# 不会形成环。
-agentrs-context = { path = "../agentrs-context" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-async-trait = { workspace = true }
-# 纯解析，不含任何 IO。重定向的相对 Location 要按当前这一跳展开，
-# 而那件事手写必错——它是安全相关的（算错基地址 = 连一个没人审过的地址）。
-url = "2"
+agentrs-types.workspace    = true
+agentrs-protocol.workspace = true
+agentrs-config.workspace   = true
+agentrs-process.workspace  = true
+
+tracing.workspace     = true
+tokio.workspace       = true
+futures.workspace     = true
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+anyhow.workspace      = true
+base64.workspace      = true
+glob.workspace        = true
+lru.workspace         = true
+workspace-hack.workspace = true
 
 [dev-dependencies]
-# 只为跑 async 测试。**没有 tempdir**：本 crate 的测试跑在内存 fake 上，
-# 一次磁盘也不该碰——那正是把工具语义搬进内核侧 crate 的收益之一。
-tokio = { version = "1", features = ["macros", "rt"] }
-
-[lints]
-workspace = true
+tempfile.workspace = true

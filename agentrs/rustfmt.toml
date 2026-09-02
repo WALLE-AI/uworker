@@ -1,2 +1,7 @@
-max_width = 110
-edition = "2021"
+edition = "2024"
+style_edition = "2024"
+fn_params_layout = "Tall"
+max_width = 120
+
+reorder_imports = true
+imports_granularity = "Crate"

@@ -1,0 +1,27 @@
+[package]
+name = "agentrs-mcp"
+description = "MCP (Model Context Protocol) client implementation for agentrs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agentrs-types.workspace    = true
+agentrs-protocol.workspace = true
+agentrs-tools.workspace    = true
+agentrs-config.workspace   = true
+
+tracing.workspace     = true
+tokio.workspace       = true
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+thiserror.workspace   = true
+anyhow.workspace      = true
+reqwest.workspace     = true
+futures.workspace     = true
+workspace-hack.workspace = true
+
+[features]
+test-utils = []

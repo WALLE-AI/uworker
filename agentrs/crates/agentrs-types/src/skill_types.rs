@@ -1,10 +1,3 @@
-// Ported from aionrs (Apache-2.0).
-//   Source: crates/aion-types/src/skill_types.rs @ f711174
-//   Copied: 2026-09-01   Modified: yes
-//   Changes: 逐字复制，仅改 crate 路径；文档待二次优化补齐。
-
-#![allow(missing_docs, reason = "aionrs 逐字移植，文档待二次优化补齐")]
-
 /// Effort level for a skill invocation or reasoning model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffortLevel {
@@ -65,3 +58,6 @@ impl ContextModifier {
     }
 }
 
+#[cfg(test)]
+#[path = "skill_types_test.rs"]
+mod skill_types_test;

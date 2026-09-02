@@ -1,21 +1,22 @@
 [package]
 name = "agentrs-memory"
+description = "Long-term memory system for agentrs: cross-session storage of user preferences, feedback, project context, and external references"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
-description = "AgentRS: 记忆选择 —— 只在候选里挑，不确定时少选"
+repository.workspace = true
 
 [dependencies]
-agentrs-contracts = { workspace = true }
-agentrs-prompts = { path = "../agentrs-prompts" }
-serde_json = { workspace = true }
+agentrs-config.workspace = true
+
+tracing.workspace    = true
+serde.workspace      = true
+serde_yaml.workspace = true
+chrono.workspace     = true
+thiserror.workspace  = true
+workspace-hack.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-agentrs-provider = { path = "../agentrs-provider" }
-agentrs-subagents = { path = "../agentrs-subagents" }
-agentrs-types = { workspace = true }
-
-[lints]
-workspace = true
+tempfile.workspace    = true
+rstest.workspace      = true
+serial_test.workspace = true

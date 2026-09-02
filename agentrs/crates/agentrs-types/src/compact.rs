@@ -1,8 +1,3 @@
-// Ported from aionrs (Apache-2.0), crates/aion-types.
-//   Source: crates/aion-types/src/compact.rs @ f711174
-//   Copied: 2026-09-01   Modified: yes
-//   Changes: crate 路径改写
-
 use serde::{Deserialize, Serialize};
 
 /// How a compaction was triggered.
@@ -31,3 +26,6 @@ pub struct CompactMetadata {
     pub messages_summarized: usize,
 }
 
+#[cfg(test)]
+#[path = "compact_test.rs"]
+mod compact_test;

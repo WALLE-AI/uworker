@@ -1,0 +1,19 @@
+[package]
+name = "agentrs-protocol"
+description = "JSON stream protocol (events, commands, approval manager) for agentrs host integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agentrs-types.workspace = true
+
+tracing.workspace    = true
+serde.workspace      = true
+serde_json.workspace = true
+tokio.workspace      = true
+workspace-hack.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

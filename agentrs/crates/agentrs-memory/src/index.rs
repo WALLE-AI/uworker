@@ -1,47 +1,51 @@
-// Ported from aionrs (Apache-2.0), crates/aion-memory.
-//   Source: crates/aion-memory/src/{index,types}.rs @ f711174
-//   Copied: 2026-09-01   Modified: yes
-//   Changes: **只取纯逻辑那半**——`read_index`/`append_index_entry`/
-//            `remove_index_entry` 三个碰磁盘的函数不移植（索引的读写归 Core，
-//            见 crate 文档）；`floor_char_boundary`（不稳定 API）换成本仓库
-//            他处同样的 `is_char_boundary` 回退；警告文本改中文并说清怎么改。
+// MEMORY.md index management and truncation.
+//
+// The index file (`MEMORY.md`) is a lightweight directory of all memory
+// topic files.  Each entry is a single Markdown link line:
+//
+//     - [Title](filename.md) — one-line summary
+//
+// The index has hard caps (lines and bytes) to prevent unbounded growth.
 
-//! 记忆索引的裁剪。
-//!
-//! `MEMORY.md` 是记忆系统的目录页，**每一轮都进系统提示**。它由模型自己写、
-//! 只增不减，所以它一定会长——一个用了三个月的工作区，那份索引可能有上千行。
-//!
-//! 不设上限的话，那份索引会安静地吃掉上下文预算的一大块，而且没人会注意到：
-//! 它不报错，只是让每一轮都更贵、可用的上下文更少。
-//!
-//! # 只裁剪，不读写
-//!
-//! 索引文件的读写归 Core（见 crate 文档：索引、权限、保留策略全归 Core）。
-//! 这里收一段已经读出来的文本，返回裁剪过的版本。
+use std::fs;
+use std::path::Path;
 
-/// 行数上限。
+use crate::error::Result;
+use crate::types::IndexTruncation;
+
+/// Maximum number of lines before truncation.
 pub const MAX_INDEX_LINES: usize = 200;
-/// 字节上限，约 25 KB。
+
+/// Maximum byte count before truncation (~25 KB).
 pub const MAX_INDEX_BYTES: usize = 25_000;
 
-/// 一次裁剪的结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexTruncation {
-    /// 裁剪后的内容。
-    pub content: String,
-    /// **原始**行数，不是裁剪后的。
-    pub line_count: usize,
-    /// **原始**字节数。
-    pub byte_count: usize,
-    /// 有没有裁过。
-    pub was_truncated: bool,
+// ---------------------------------------------------------------------------
+// Read
+// ---------------------------------------------------------------------------
+
+/// Read the MEMORY.md index file at `path`.
+///
+/// Returns the raw content as a string.  If the file does not exist or
+/// cannot be read, returns an empty string (silent fallback — the index
+/// is informational and its absence is not an error).
+pub fn read_index(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_default()
 }
 
-/// 把索引裁进行数与字节两个上限之内。
+// ---------------------------------------------------------------------------
+// Truncation
+// ---------------------------------------------------------------------------
+
+/// Truncate index content to the line AND byte caps.
 ///
-/// 两个上限都要，因为失效模式有两种：条目**太多**（行数），
-/// 以及条目**太长**（字节）。只设行数上限的话，200 行每行两千字的索引照样
-/// 能吃掉一整个预算。
+/// Algorithm:
+/// 1. Trim whitespace from both ends.
+/// 2. Check original line count and byte count against limits.
+/// 3. If within both limits, return as-is.
+/// 4. Line-truncate first (slice to first `MAX_INDEX_LINES` lines).
+/// 5. If still over `MAX_INDEX_BYTES`, byte-truncate at the last newline
+///    before the cap so we never cut mid-line.
+/// 6. Append a diagnostic warning naming which cap(s) fired.
 pub fn truncate_index(raw: &str) -> IndexTruncation {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -57,13 +61,12 @@ pub fn truncate_index(raw: &str) -> IndexTruncation {
     let line_count = lines.len();
     let byte_count = trimmed.len();
 
-    let 行超了 = line_count > MAX_INDEX_LINES;
-    // 按**原始**字节数判，不按裁完行之后的：字节上限针对的正是"行少但每行很长"，
-    // 而那种输入裁完行之后可能已经不超了，于是警告不会发出——
-    // 用户就永远不知道该把条目写短些。
-    let 字节超了 = byte_count > MAX_INDEX_BYTES;
+    let was_line_truncated = line_count > MAX_INDEX_LINES;
+    // Check original byte count — long lines are the failure mode the
+    // byte cap targets, so post-line-truncation size would understate.
+    let was_byte_truncated = byte_count > MAX_INDEX_BYTES;
 
-    if !行超了 && !字节超了 {
+    if !was_line_truncated && !was_byte_truncated {
         return IndexTruncation {
             content: trimmed.to_owned(),
             line_count,
@@ -72,147 +75,120 @@ pub fn truncate_index(raw: &str) -> IndexTruncation {
         };
     }
 
-    let mut out = if 行超了 {
+    // Step 1: line truncation
+    let mut truncated = if was_line_truncated {
         lines[..MAX_INDEX_LINES].join("\n")
     } else {
         trimmed.to_owned()
     };
 
-    if out.len() > MAX_INDEX_BYTES {
-        // 上限可能落在一个多字节字符中间（中文索引尤其），
-        // 那里切下去会 panic。先退到字符边界。
-        let mut cap = MAX_INDEX_BYTES.min(out.len());
-        while cap > 0 && !out.is_char_boundary(cap) {
-            cap -= 1;
-        }
-        // 再退到最近的换行，别把一条索引切成半句。
-        let cut = out[..cap].rfind('\n').filter(|&p| p > 0).unwrap_or(cap);
-        out.truncate(cut);
+    // Step 2: byte truncation (on the possibly line-truncated result).
+    // The cap may land inside a multi-byte UTF-8 char (e.g. CJK text), where
+    // both slicing and `String::truncate` panic — round down to a char
+    // boundary first.
+    if truncated.len() > MAX_INDEX_BYTES {
+        let cap = truncated.floor_char_boundary(MAX_INDEX_BYTES);
+        let cut_at = truncated[..cap].rfind('\n').filter(|&pos| pos > 0);
+        truncated.truncate(cut_at.unwrap_or(cap));
     }
 
-    // 说清是哪个上限触发的，以及**怎么改**。只说"被截断了"的话，
-    // 用户下一步只能猜。
-    let 原因 = match (行超了, 字节超了) {
-        (true, false) => format!("有 {line_count} 行（上限 {MAX_INDEX_LINES} 行）"),
+    // Build the warning message
+    let reason = match (was_line_truncated, was_byte_truncated) {
+        (true, false) => format!("{line_count} lines (limit: {MAX_INDEX_LINES})"),
         (false, true) => format!(
-            "有 {}（上限 {}）——条目写得太长了",
-            人读字节(byte_count),
-            人读字节(MAX_INDEX_BYTES)
+            "{} (limit: {}) \u{2014} index entries are too long",
+            format_size(byte_count),
+            format_size(MAX_INDEX_BYTES),
         ),
-        _ => format!("有 {line_count} 行、{}", 人读字节(byte_count)),
+        _ => format!("{line_count} lines and {}", format_size(byte_count),),
     };
-    out.push_str(&format!(
-        "\n\n> 注意：MEMORY.md {原因}，**只加载了一部分**。\
-         请把每条索引压到一行、200 字以内，细节移进各自的主题文件。"
+
+    truncated.push_str(&format!(
+        "\n\n> WARNING: MEMORY.md is {reason}. \
+         Only part of it was loaded. \
+         Keep index entries to one line under ~200 chars; \
+         move detail into topic files."
     ));
 
     IndexTruncation {
-        content: out,
+        content: truncated,
         line_count,
         byte_count,
         was_truncated: true,
     }
 }
 
-fn 人读字节(n: usize) -> String {
-    if n >= 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
+// ---------------------------------------------------------------------------
+// Append
+// ---------------------------------------------------------------------------
+
+/// Append an entry to the MEMORY.md index file.
+///
+/// Format: `- [title](filename) — summary`
+///
+/// Creates the file (and parent directories) if it doesn't exist.
+/// Ensures a newline separator before the new entry.
+pub fn append_index_entry(path: &Path, title: &str, filename: &str, summary: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let entry = format!("- [{title}]({filename}) \u{2014} {summary}");
+
+    let mut content = fs::read_to_string(path).unwrap_or_default();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&entry);
+    content.push('\n');
+
+    fs::write(path, content)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Remove
+// ---------------------------------------------------------------------------
+
+/// Remove the index entry that references `filename`.
+///
+/// Scans the index for any line containing `(filename)` and removes it.
+/// Idempotent — silently succeeds if the file doesn't exist or the
+/// entry is not found.
+pub fn remove_index_entry(path: &Path, filename: &str) -> Result<()> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+
+    let needle = format!("({filename})");
+    let filtered: Vec<&str> = content.lines().filter(|line| !line.contains(&needle)).collect();
+
+    // Preserve trailing newline if original had one
+    let mut result = filtered.join("\n");
+    if !result.is_empty() {
+        result.push('\n');
+    }
+
+    fs::write(path, result)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Format a byte count as a human-readable size string.
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
     } else {
-        format!("{n} 字节")
+        let kb = bytes as f64 / 1024.0;
+        format!("{kb:.1} KB")
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 没超上限时原样返回() {
-        let r = truncate_index("- [甲](a.md) — 一句话\n- [乙](b.md) — 另一句");
-        assert!(!r.was_truncated);
-        assert_eq!(r.line_count, 2);
-        assert!(r.content.contains("乙"));
-        assert!(!r.content.contains("注意"));
-    }
-
-    #[test]
-    fn 首尾空白被去掉() {
-        let r = truncate_index("\n\n  内容  \n\n");
-        assert_eq!(r.content, "内容");
-    }
-
-    #[test]
-    fn 空索引不是错误() {
-        // 一份还没写过任何记忆的工作区，索引就是空的。
-        let r = truncate_index("   \n\n ");
-        assert!(!r.was_truncated);
-        assert_eq!(r.line_count, 0);
-        assert_eq!(r.content, "");
-    }
-
-    #[test]
-    fn 行太多时裁到上限并说明() {
-        let raw: String = (0..300).map(|n| format!("- 第 {n} 条\n")).collect();
-        let r = truncate_index(&raw);
-        assert!(r.was_truncated);
-        assert_eq!(r.line_count, 300, "报的是原始行数");
-        assert!(r.content.contains("有 300 行"), "{}", &r.content[r.content.len() - 120..]);
-        // 裁到上限，加上末尾那段警告（空行 + 一行）。
-        assert!(r.content.lines().count() <= MAX_INDEX_LINES + 3);
-    }
-
-    #[test]
-    fn 行少但每行很长时按字节裁() {
-        // 只设行数上限的话，200 行每行两千字的索引照样能吃掉一整个预算。
-        let raw: String = (0..30).map(|n| format!("- {n} {}\n", "长".repeat(400))).collect();
-        let r = truncate_index(&raw);
-        assert!(r.was_truncated);
-        assert!(r.content.contains("条目写得太长了"), "{}", &r.content[r.content.len() - 150..]);
-    }
-
-    #[test]
-    fn 中文索引裁剪时不会崩() {
-        // 字节上限几乎必然落在某个汉字中间，那里切下去会 panic。
-        let raw: String = (0..500).map(|n| format!("- 第{n}条中文记忆条目内容\n")).collect();
-        let r = truncate_index(&raw);
-        assert!(r.was_truncated);
-        // 内容仍是合法 UTF-8（能走到这就是）。
-        assert!(r.content.contains("第0条"));
-    }
-
-    #[test]
-    fn 不把一条索引切成半句() {
-        // 半条索引比没有更糟：模型会以为那个记忆就叫那半个名字。
-        let 一条 = format!("- [{}](x.md) — 说明\n", "名".repeat(300));
-        let raw = 一条.repeat(40);
-        let r = truncate_index(&raw);
-        let 正文 = r.content.split("\n\n> 注意").next().unwrap();
-        // 每一行要么完整，要么不在。
-        for line in 正文.lines() {
-            assert!(line.is_empty() || line.ends_with("说明"), "半条：{line}");
-        }
-    }
-
-    #[test]
-    fn 警告说清了怎么改() {
-        // 只说"被截断了"的话，用户下一步只能猜。
-        let raw: String = (0..300).map(|n| format!("- 第 {n} 条\n")).collect();
-        let w = truncate_index(&raw).content;
-        assert!(w.contains("压到一行"), "{w}");
-        assert!(w.contains("移进各自的主题文件"), "{w}");
-    }
-
-    #[test]
-    fn 两个上限都超时都报() {
-        let raw: String = (0..400).map(|n| format!("- {n} {}\n", "长".repeat(100))).collect();
-        let r = truncate_index(&raw);
-        let w = &r.content;
-        assert!(w.contains("行、"), "两个都该提：{}", &w[w.len() - 140..]);
-    }
-
-    #[test]
-    fn 字节数按人读的方式呈现() {
-        assert_eq!(人读字节(500), "500 字节");
-        assert_eq!(人读字节(25_000), "24.4 KB");
-    }
-}
+#[path = "index_test.rs"]
+mod index_test;

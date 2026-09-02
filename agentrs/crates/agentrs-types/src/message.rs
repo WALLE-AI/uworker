@@ -1,128 +1,78 @@
-// Ported from aionrs (Apache-2.0).
-//   Source: aionrs/crates/aion-types/src/message.rs @ a5df989d110fb424bcd496b413e7ce7e20754414
-//   Copied: 2026-08-25   Modified: yes
-//   Changes:
-//     - 时间戳由 chrono::DateTime<Utc> 改为 agentrs-contracts::Timestamp，
-//       并移除 Message::now()——它调用 Utc::now()，违反"内核不读真实时钟"的边界判据；
-//       时刻一律由 Clock port 提供。
-//     - 移除 turn_id 字段：归属关系改由事件 envelope 的 Causality 承载，
-//       避免消息与事件两处各存一份归属。
-//     - ToolUseId 由裸 String 改为 contracts::ToolCallId newtype。
-//     - 增加 PartialEq/Eq 以支持契约测试。
-//     - 移除 base64 解码校验（依赖 base64 crate），仅保留结构与媒体类型判定。
+use std::{error, fmt};
 
-//! provider 无关的消息与内容块模型。
-//!
-//! 这一层刻意保留 provider 私有元数据（`extra`、`signature`、`ProviderItem`），
-//! 因为工具调用与 reasoning 签名必须能 round-trip。它们同时也是
-//! `HistoryLegalization`（架构 §8.1）要处理的那批阻抗来源——签名会过期、
-//! 跨 provider 会失效，修复只允许发生在投影期，不回写事实流。
-
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use agentrs_contracts::ids::{Timestamp, ToolCallId};
+/// Unique identifier for a tool call
+pub type ToolUseId = String;
 
-/// 消息中的单个内容块。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A single content block within a message
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
-    /// 纯文本。
+    /// Plain text content
     #[serde(rename = "text")]
-    Text {
-        /// 文本内容。
-        text: String,
-    },
+    Text { text: String },
 
-    /// 图像（data URI）。
+    /// An image content block (base64 encoded data URI)
     #[serde(rename = "image_url")]
-    Image {
-        /// 图像地址。
-        image_url: ImageUrl,
-    },
+    Image { image_url: ImageUrl },
 
-    /// 助手发起的工具调用。
+    /// A tool invocation from the assistant
     #[serde(rename = "tool_use")]
     ToolUse {
-        /// 调用标识。
-        id: ToolCallId,
-        /// 工具名。
+        id: ToolUseId,
         name: String,
-        /// 调用参数。
         input: Value,
-        /// provider 私有元数据（如 Gemini thought_signature）。
-        ///
-        /// **原样 round-trip**，使 provider 能在后续请求中带回。
+        /// Opaque provider-specific metadata (e.g. Gemini thought_signature).
+        /// Round-tripped verbatim so the provider can include it in follow-up requests.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra: Option<Value>,
     },
 
-    /// 工具执行结果，以用户消息回灌。
+    /// Result of a tool execution, sent back as user message
     #[serde(rename = "tool_result")]
     ToolResult {
-        /// 对应的调用标识。
-        tool_use_id: ToolCallId,
-        /// 结果正文。
+        tool_use_id: ToolUseId,
         content: String,
-        /// 是否为错误结果。**错误是结构化结果，不是异常。**
         is_error: bool,
     },
 
-    /// 思考 / 推理块。
+    /// Thinking / reasoning block. Serialized as `thinking` for Anthropic
+    /// and as `reasoning_content` for OpenAI-compatible providers.
     #[serde(rename = "thinking")]
     Thinking {
-        /// 思考内容。
         thinking: String,
-        /// provider 签名。
-        ///
-        /// round-trip Anthropic thinking 块时必需，但它是**有生命周期的不透明令牌**——
-        /// 跨 provider fallback、跨压缩、跨长时间挂起后会失效，届时由
-        /// `HistoryLegalization` 在投影期丢弃并留痕。
+        /// Opaque provider signature required when round-tripping Anthropic thinking blocks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
 
-    /// 不透明的 provider 输出项，后续请求必须原样重放。
-    ///
-    /// 非其归属 provider 必须忽略此块。
+    /// Opaque provider output item that must be replayed on later requests.
+    /// Providers other than the named owner must ignore this block.
     #[serde(rename = "provider_item")]
-    ProviderItem {
-        /// 归属 provider。
-        provider: String,
-        /// 原样载荷。
-        item: Value,
-    },
+    ProviderItem { provider: String, item: Value },
 }
 
-impl ContentBlock {
-    /// 便捷构造纯文本块。
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
-    }
-
-    /// 该块是否为空内容（空文本块不进入派生历史）。
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Text { text } => text.is_empty(),
-            Self::Thinking { thinking, .. } => thinking.is_empty(),
-            _ => false,
-        }
-    }
-}
-
-/// 图像地址。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Image URL for content blocks
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageUrl {
-    /// data URI 或远程地址。
     pub url: String,
 }
 
-/// 主流 provider 普遍接受的图像媒体类型。
+/// Media types that are widely accepted as vision input by major providers.
 pub const SUPPORTED_IMAGE_MEDIA_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
-/// 由文件扩展名映射到受支持的图像媒体类型。
+/// Map a file extension to a supported image media type.
+///
+/// Returns `None` for extensions that are not reliably accepted as image
+/// inputs by the supported providers (e.g. `svg`, `bmp`, `tiff`).
 pub fn extension_to_image_media_type(ext: &str) -> Option<&'static str> {
-    match ext.to_ascii_lowercase().as_str() {
+    let ext = ext.trim_start_matches('.').to_lowercase();
+    match ext.as_str() {
         "jpg" | "jpeg" => Some("image/jpeg"),
         "png" => Some("image/png"),
         "gif" => Some("image/gif"),
@@ -131,177 +81,157 @@ pub fn extension_to_image_media_type(ext: &str) -> Option<&'static str> {
     }
 }
 
-/// 目标模型的图像输入能力。
-///
-/// 不支持图像的模型在 `HistoryLegalization` 阶段把图像块降级为文本占位
-/// （`DroppedUnsupportedBlock`），而不是直接报错。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImageInputCapability {
-    /// 支持。
-    Supported,
-    /// 不支持。
-    Unsupported,
+/// Errors that can occur when validating an image data URI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageUrlError {
+    /// The URL is not a well-formed `data:` URI with a `;base64,` payload.
+    InvalidFormat,
+    /// The media type is missing or not in the supported image set.
+    UnsupportedMediaType(String),
+    /// The base64 payload could not be decoded.
+    InvalidBase64,
 }
 
-impl ImageInputCapability {
-    /// 是否支持图像输入。
-    pub fn supports_images(self) -> bool {
-        matches!(self, Self::Supported)
+impl fmt::Display for ImageUrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFormat => write!(f, "image URL is not a data URI with base64 payload"),
+            Self::UnsupportedMediaType(mime) => {
+                write!(f, "unsupported image media type: {mime}")
+            }
+            Self::InvalidBase64 => write!(f, "image base64 payload is invalid"),
+        }
     }
 }
 
-/// 对话中的一条消息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl error::Error for ImageUrlError {}
+
+impl ImageUrl {
+    /// Validate that this URL is a supported base64-encoded image data URI.
+    pub fn validate(&self) -> Result<(), ImageUrlError> {
+        let rest = self.url.strip_prefix("data:").ok_or(ImageUrlError::InvalidFormat)?;
+        let (mime_and_params, _) = rest.split_once(",").ok_or(ImageUrlError::InvalidFormat)?;
+        if !mime_and_params.ends_with(";base64") {
+            return Err(ImageUrlError::InvalidFormat);
+        }
+        let mime = &mime_and_params[..mime_and_params.len() - ";base64".len()];
+        if mime.is_empty() || !SUPPORTED_IMAGE_MEDIA_TYPES.contains(&mime) {
+            return Err(ImageUrlError::UnsupportedMediaType(mime.to_string()));
+        }
+        let payload = &self.url[self.url.find(',').unwrap() + 1..];
+        STANDARD.decode(payload).map_err(|_| ImageUrlError::InvalidBase64)?;
+        Ok(())
+    }
+
+    /// Return an estimate of the decoded byte size of the base64 payload.
+    ///
+    /// This is an upper-bound estimate returned by `base64::decoded_len_estimate`
+    /// and is intended for cost heuristics. Returns `None` if the URL is not a
+    /// well-formed base64 data URI.
+    pub fn decoded_byte_size(&self) -> Option<usize> {
+        let (_, payload) = self.url.strip_prefix("data:")?.split_once(",")?;
+        Some(base64::decoded_len_estimate(payload.len()))
+    }
+}
+
+/// Resolved image-input support for the selected provider and model.
+///
+/// The engine deliberately does not infer this from a provider family. Hosts
+/// that own a model catalog must resolve the capability for the concrete
+/// provider/model pair and pass it through `ProviderCompat`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageInputCapability {
+    Supported,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+impl ImageInputCapability {
+    pub fn supports_images(self) -> bool {
+        self == Self::Supported
+    }
+}
+
+/// A message in the conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// 角色。
     pub role: Role,
-    /// 内容块序列。
     pub content: Vec<ContentBlock>,
-    /// 创建时刻。**由 Clock port 提供**，内核不读真实时钟。
+    /// When this message was created.  Used by microcompact to decide
+    /// whether old tool results should be cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<Timestamp>,
+    pub timestamp: Option<DateTime<Utc>>,
+    /// The turn this message belongs to (every message appended during one
+    /// engine run carries the same id). Used as the session-side anchor when
+    /// forking a session at a historical turn. `None` on messages written
+    /// before turn tracking existed and on compaction-synthesized summaries —
+    /// such messages cannot anchor a fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 impl Message {
-    /// 构造一条消息。时刻由调用方从 Clock port 取得后传入。
+    /// Create a message without a timestamp (backward-compatible default).
     pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
         Self {
             role,
             content,
             timestamp: None,
+            turn_id: None,
         }
     }
 
-    /// 附上时刻。
-    pub fn at(mut self, ts: Timestamp) -> Self {
-        self.timestamp = Some(ts);
-        self
-    }
-
-    /// 是否不含任何非空内容。
-    ///
-    /// 空 content 的 assistant 消息**不进入派生历史，但其事件必须保留**——
-    /// 它承载 usage 与 `max_tokens` 之类的终止信息（架构 §4.3.1）。
-    pub fn is_empty(&self) -> bool {
-        self.content.iter().all(ContentBlock::is_empty)
+    /// Create a message stamped with the current UTC time.
+    pub fn now(role: Role, content: Vec<ContentBlock>) -> Self {
+        Self {
+            role,
+            content,
+            timestamp: Some(Utc::now()),
+            turn_id: None,
+        }
     }
 }
 
-/// 消息角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
-    /// 用户。
     User,
-    /// 助手。
     Assistant,
-    /// 系统。
     System,
-    /// 工具。
     Tool,
 }
 
-/// 模型停止生成的原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Why the model stopped generating
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// 自然结束。
+    /// Model finished naturally
     EndTurn,
-    /// 需要调用工具。
+    /// Model wants to call tools
     ToolUse,
-    /// 触及 max_tokens。
+    /// Hit max_tokens limit
     MaxTokens,
-    /// 触及回合上限。
+    /// Hit max_turns limit
     MaxTurns,
 }
 
-/// token 用量。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Token usage statistics
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// provider 报告的完整输入，含缓存读取与创建部分。
+    /// Full provider input, including cache-read and cache-creation tokens.
     pub input_tokens: u64,
-    /// 完整输出，含被计入总数的 reasoning token。
+    /// Full provider output, including reasoning tokens when reported as part
+    /// of the completion total.
     pub output_tokens: u64,
-    /// `input_tokens` 中用于创建 provider 侧缓存的部分。
+    /// Subset of `input_tokens` used to create a provider-side prompt cache.
     #[serde(default)]
     pub cache_creation_tokens: u64,
-    /// `input_tokens` 中命中 provider 侧缓存的部分。
+    /// Subset of `input_tokens` read from a provider-side prompt cache.
     #[serde(default)]
     pub cache_read_tokens: u64,
 }
 
-impl TokenUsage {
-    /// 缓存命中率。无输入时返回 `None`。
-    ///
-    /// M1 出口标准要求真实 provider 连续 10 轮对话 ≥ 70%。
-    pub fn cache_hit_rate(&self) -> Option<f64> {
-        if self.input_tokens == 0 {
-            return None;
-        }
-        Some(self.cache_read_tokens as f64 / self.input_tokens as f64)
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn provider_私有元数据可_round_trip() {
-        // 工具调用与 reasoning 签名必须原样往返，否则后续请求会被 provider 拒绝。
-        let block = ContentBlock::ToolUse {
-            id: "tc1".into(),
-            name: "Read".into(),
-            input: serde_json::json!({"path": "a.rs"}),
-            extra: Some(serde_json::json!({"thought_signature": "opaque"})),
-        };
-        let back: ContentBlock = serde_json::from_str(&serde_json::to_string(&block).unwrap()).unwrap();
-        assert_eq!(back, block);
-    }
-
-    #[test]
-    fn thinking_签名可缺省且缺省时不序列化() {
-        let b = ContentBlock::Thinking {
-            thinking: "…".into(),
-            signature: None,
-        };
-        let json = serde_json::to_string(&b).unwrap();
-        assert!(!json.contains("signature"), "缺省签名不应出现在 wire 上：{json}");
-    }
-
-    #[test]
-    fn 空内容助手消息可被识别() {
-        // 它不进入派生历史，但事件必须保留（承载 usage / max_tokens）。
-        let m = Message::new(Role::Assistant, vec![ContentBlock::text("")]);
-        assert!(m.is_empty());
-        assert!(!Message::new(Role::Assistant, vec![ContentBlock::text("hi")]).is_empty());
-    }
-
-    #[test]
-    fn 消息时刻由外部注入而非自取() {
-        // 原实现有 Message::now() 调用 Utc::now()；移植时移除。
-        let m = Message::new(Role::User, vec![]).at(Timestamp(1234));
-        assert_eq!(m.timestamp, Some(Timestamp(1234)));
-    }
-
-    #[test]
-    fn 缓存命中率可计算() {
-        let u = TokenUsage {
-            input_tokens: 1000,
-            cache_read_tokens: 800,
-            ..Default::default()
-        };
-        assert_eq!(u.cache_hit_rate(), Some(0.8));
-        assert_eq!(TokenUsage::default().cache_hit_rate(), None);
-    }
-
-    #[test]
-    fn 扩展名映射覆盖受支持的媒体类型() {
-        for ext in ["jpg", "JPEG", "png", "gif", "webp"] {
-            let mt = extension_to_image_media_type(ext).unwrap();
-            assert!(SUPPORTED_IMAGE_MEDIA_TYPES.contains(&mt), "{ext} -> {mt}");
-        }
-        assert_eq!(extension_to_image_media_type("bmp"), None);
-    }
-}
+#[path = "message_test.rs"]
+mod message_test;

@@ -1,28 +1,36 @@
 [package]
 name = "agentrs-cli"
+description = "CLI binary for agentrs — a multi-provider AI agent with tool orchestration"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
-description = "AgentRS: 轻量命令行驱动器。默认只读；真实执行需显式 --adapter dev"
+repository.workspace = true
+keywords = ["ai", "agent", "cli", "llm", "anthropic"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "agentrs"
 path = "src/main.rs"
 
 [dependencies]
-agentrs-contracts = { workspace = true }
-agentrs-types = { workspace = true }
-agentrs-runtime = { path = "../agentrs-runtime" }
-agentrs-provider = { path = "../agentrs-provider" }
-agentrs-dev-adapter = { path = "../agentrs-dev-adapter" }
-agentrs-testkit = { path = "../agentrs-testkit" }
-agentrs-context = { path = "../agentrs-context" }
-agentrs-observability = { path = "../agentrs-observability" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-async-trait = { workspace = true }
+agentrs-agent.workspace    = true
+agentrs-compact.workspace  = true
+agentrs-config.workspace   = true
+agentrs-memory.workspace   = true
+agentrs-providers.workspace = true
+agentrs-tools.workspace    = true
+agentrs-mcp.workspace      = true
+agentrs-protocol.workspace = true
+agentrs-skills.workspace   = true
+agentrs-types.workspace    = true
+agentrs-tui.workspace      = true
 
-[lints]
-workspace = true
+tokio.workspace              = true
+anyhow.workspace             = true
+clap.workspace               = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
