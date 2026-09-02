@@ -373,6 +373,10 @@ impl Chord {
     ///
     /// Shift is dropped for characters: the terminal has already applied it, and
     /// keeping it would make `A` and `shift+a` two different chords.
+    ///
+    /// **The character is lowercased**, so a chord is a lookup key and nothing
+    /// more. Whatever inserts text must take the character from the key event
+    /// instead — inserting `chord.key` makes capital letters impossible to type.
     pub fn from_event(event: &KeyEvent) -> Option<Self> {
         let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
         let alt = event.modifiers.contains(KeyModifiers::ALT);

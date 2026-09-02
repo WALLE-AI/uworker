@@ -33,21 +33,74 @@
 |---|---|---:|---|
 | `crates/agentrs-types/src/message.rs` | `crates/aion-types/src/message.rs` | 237 | ✅ W2 |
 | `crates/agentrs-types/src/llm.rs` | `crates/aion-types/src/llm.rs` | 53 | ✅ W2 |
-| `crates/agentrs-provider/src/framing.rs` | `crates/aion-providers/src/framing.rs` | | 待办 |
-| `crates/agentrs-provider/src/parser.rs` | `crates/aion-providers/src/parser.rs` | | 待办 |
+| `crates/agentrs-provider/src/sse.rs` | `crates/aion-providers/src/framing.rs` @ `f711174` | 25 | ✅ **仅 `bedrock_payload_to_frame` 一函数**。SSE 行解帧本仓库独立写成（更早、且是纯函数无 I/O），不移植 |
+| — | `crates/aion-providers/src/parser.rs` | | **不移植**：其职责已由本仓库的 `sse.rs` + 各投影器覆盖 |
 | `crates/agentrs-provider/src/anthropic.rs` | `crates/aion-providers/src/anthropic_shared.rs` @ `f711174` | 441 | ✅ Phase B（剥离 sanitize/tracing/generate_tool_id，增加 cache_control 断点） |
-| `crates/agentrs-provider/src/openai.rs` | `crates/aion-providers/src/openai.rs` | | 待办 |
+| — | `crates/aion-providers/src/openai.rs` | | **不移植**：本仓库 `openai.rs` 已独立写成且更完整（488 行 vs 269） |
 | `crates/agentrs-provider/src/anthropic_wire.rs` | `crates/aion-providers/src/{bedrock,vertex}.rs` @ `f711174` | 707 | ✅ Phase B（**只取线格式**；凭据链与 SigV4 签名按 §1.1 归 Core，未移植） |
 | `crates/agentrs-provider/src/openai_responses.rs` | `crates/aion-providers/src/openai_responses{,_projector}.rs` @ `f711174` | 447 | ✅ Phase B（剥离 generate_call_id / orphan 清理 / 静默降级） |
-| `crates/agentrs-provider/src/compat.rs` | `crates/aion-config/src/compat.rs` | | 待办 |
+| `crates/agentrs-provider/src/compat.rs` | `crates/aion-config/src/compat.rs` | 106 | ✅ 借鉴形态，剥离配置加载（配置归 Core 注入）——见该文件头部说明 |
 | `crates/agentrs-context/src/cache_diagnostics.rs` | `crates/aion-agent/src/cache_diagnostics.rs` @ `f711174` | 164 | ✅ Phase B（归因改走 cache.rs 分段；新增 Unsupported 判定） |
-| `crates/agentrs-context/src/sanitize.rs` 等 | `crates/aion-compact/src/*` | | 待办 |
+| `crates/agentrs-context/src/compact/mod.rs` | `crates/aion-compact/src/{lib,api}.rs` @ `f711174` | 40 | ✅（两文件合一；补上"哪一级会改内容、因此不能用在 Read 上"的判据） |
+| `crates/agentrs-context/src/compact/level.rs` | `crates/aion-compact/src/level.rs` @ `f711174` | 45 | ✅（`Default` 改手写以便把"为什么默认 Safe"写在旁边） |
+| `crates/agentrs-context/src/compact/sanitize.rs` | `crates/aion-compact/src/sanitize.rs` @ `f711174` | 60 | ✅（ANSI 剥离改手写状态机，**去掉 `regex` 依赖**；`merge_blank_lines` 三分支重写为等价的两分支） |
+| `crates/agentrs-context/src/compact/fold.rs` | `crates/aion-compact/src/fold.rs` @ `f711174` | 55 | ✅（**修了一处缺陷**：相似度分子数字符、分母数字节，中文行比值恒大于 1，任意两行中文都判为相似） |
+| `crates/agentrs-context/src/compact/json.rs` | `crates/aion-compact/src/json.rs` @ `f711174` | 60 | ✅（let-chain 改嵌套 if，本仓库是 edition 2021） |
+| `crates/agentrs-context/src/compact/toon.rs` | `crates/aion-compact/src/toon.rs` @ `f711174` | 105 | ✅（let-chain 改写；消除对已校验值的二次 `unwrap`；说明文本改中文） |
 
 ### B 类：复制逻辑，改造接缝（约 2,900 行）
 
 | 目标文件 | 源路径 | commit | 改造要点 | 状态 |
 |---|---|---|---|---|
-| _(Phase B 起填充)_ | | | | 未开始 |
+| `crates/agentrs-skills/src/pack/types.rs` | `crates/aion-skills/src/types.rs` | `f711174` | 去掉 `SkillSource`/`LoadedFrom`/`skill_root`——**"技能从哪个目录发现的"归 Core**，内核不做发现；删掉两个从未被读取的字段 | ✅ |
+| `crates/agentrs-skills/src/pack/frontmatter.rs` | `crates/aion-skills/src/frontmatter.rs` | `f711174` | 解析失败改为返回 `ParseOutcome` 三态，不再 `tracing::warn!` 后吞掉（内核不持有日志设施，且"技能装上了却不生效"该是调用方看得见的事）；花括号展开加 256 条上限；`content_length` 改按字符数（原按字节，中文高估三倍）；let-chain 改写为 edition 2021 语法 | ✅ |
+| `crates/agentrs-skills/src/pack/mod.rs` | `crates/aion-skills/src/frontmatter.rs`（模块文档） | `f711174` | 新写的模块文档，说明"只解析不发现"这条边界 | ✅ |
+| `crates/agentrs-skills/src/pack/permissions.rs` | `crates/aion-skills/src/permissions.rs` | `f711174` | **修了一处缺陷**：`Prefix` 规则改为要求前缀以分隔符结尾——上游把 `db*` 也存成 `Prefix("db")`，于是它命中 `database`，而文档说要防的正是这件事；`auto_approve` 改名 `assume_yes` 并写明它绕不过 deny | ✅ |
+| `crates/agentrs-skills/src/pack/listing.rs` | `crates/aion-skills/src/prompt.rs` | `f711174` | `SkillSource::Bundled` 换成调用方传入的 `pinned` 名字集（"哪些优先"是优先级，不是发现来源）；预算改显式传入，不再第二次反算 token；两处各写一遍的截断合并为一个函数（原来 `>=`/`-1` 边界不一致，同一描述在两种降级模式下截在不同位置） | ✅ |
+| `crates/agentrs-skills/src/pack/bridge.rs` | `crates/aion-skills/src/context_modifier.rs` | `f711174` | 本仓库 `ContextModifier` 只表达**单调收窄**，没有 model/effort 字段；`allowed_tools` 映到 `tool_subset`，model/effort 单独返回——它们不是收窄，混进去会让合并语义含糊 | ✅ |
+| `crates/agentrs-skills/src/pack/substitution.rs` | `crates/aion-skills/src/substitution.rs` | `f711174` | 三遍正则改写为**一遍扫描**，去掉 `regex` 依赖，并**修掉一处缺陷**：上游前一遍替换进去的值会被后一遍再扫一次，参数值里含 `$1` 就会被二次替换；占位符前缀改 `AGENTRS_` | ✅ |
+| `crates/agentrs-skills/src/pack/conditional.rs` | `crates/aion-skills/src/conditional.rs` | `f711174` | 用本仓库的 `agentrs_types::glob` 而非 `glob` crate（两份 glob 语义会分叉）；去掉 `cwd` 与相对化——内核不知道 cwd，直接收工作区相对路径；`HashMap` 改 `BTreeMap` 使**激活顺序确定**（上游明说不保证，而不确定的顺序让 trajectory 不可重放） | ✅ |
+| `crates/agentrs-memory/src/index.rs` | `crates/aion-memory/src/{index,types}.rs` | `f711174` | **只取纯逻辑那半**：`truncate_index` + `IndexTruncation`；三个碰磁盘的函数不移植（索引读写归 Core）；不稳定的 `floor_char_boundary` 换成 `is_char_boundary` 回退 | ✅ |
+| `crates/agentrs-types/src/glob.rs` | — | | 非移植：本仓库原有的 glob 匹配器从 `agentrs-tools` 上移到 `agentrs-types`，好让工具与技能只用一份 | — |
+| `crates/agentrs-tools/src/mcp/wire.rs` | `crates/aion-mcp/src/protocol.rs` | `f711174` | **只取线格式**：进程生命周期、stdio 传输、凭据按 §1.1 归 Core，未移植；两个方向都实现 `Serialize + Deserialize`（上游各只实现一个，宿主没法回放录下来的会话）；补 `McpToolResult::text()` 与 `has_non_text()`——图文混排时默默丢图会让模型以为工具什么也没返回 | ✅ |
+| `crates/agentrs-types/src/compact.rs` | `crates/aion-types/src/compact.rs` | `f711174` | 逐字复制，仅改 crate 路径 | ✅ |
+| `crates/agentrs-tools/src/tool_policy.rs` | `crates/aion-agent/src/tool_policy.rs` | `f711174` | 逐字复制 | ✅ |
+| `crates/agentrs-context/src/strategy/mod.rs` | `crates/aion-agent/src/compact/mod.rs` | `f711174` | 合并 `compact/mod.rs`：并入 `context_usage` 与 config | ✅ |
+| `crates/agentrs-context/src/strategy/estimate.rs` | `crates/aion-agent/src/compact/estimate.rs` | `f711174` | 逐字复制；`ImageUrl` 无 `decoded_byte_size()`，改为就地从 data URI 的 base64 段估算 | ✅ |
+| `crates/agentrs-context/src/strategy/state.rs` | `crates/aion-agent/src/compact/state.rs` | `f711174` | 逐字复制 | ✅ |
+| `crates/agentrs-context/src/strategy/auto.rs` | `crates/aion-agent/src/compact/auto.rs` | `f711174` | `LlmProvider` 换成注入的 `Summarizer` trait（context 依赖 provider 会把分层反过来且拖进 reqwest——与 runtime 用 `StepDriver` 同一理由）；`mpsc::Receiver` 换 `Vec<LlmEvent>`（本仓库 provider 契约一次返回全部事件，于是不再需要 tokio）；let-chain 改 edition 2021 写法 | ✅ |
+| `crates/agentrs-context/src/strategy/micro.rs` | `crates/aion-agent/src/compact/micro.rs` | `f711174` | `Utc::now()` 换成调用方传入的 `Timestamp`；`HashMap<String,_>` 改 `HashMap<ToolCallId,_>` 以匹配本仓库类型 | ✅ |
+| `crates/agentrs-context/src/strategy/emergency.rs` | `crates/aion-agent/src/compact/emergency.rs` | `f711174` | 逐字复制；`aion_config::compact` 路径改写 | ✅ |
+| `crates/agentrs-context/src/strategy/prompt.rs` | `crates/aion-agent/src/compact/prompt.rs` | `f711174` | 逐字复制 | ✅ |
+| `crates/agentrs-context/src/strategy/usage.rs` | `crates/aion-agent/src/context_usage.rs` | `f711174` | 逐字复制后 `DateTime<Utc>`→`Timestamp`、`Utc::now()`→调用方传入——内核经 Clock port 拿时刻，直接读真实时钟会让 `cargo test --workspace` 不再确定 | ✅ |
+| `crates/agentrs-context/src/strategy/config.rs` | `crates/aion-config/src/compact.rs` | `f711174` | 逐字复制。落在 context 而不是新开 config crate——本仓库配置一律注入 | ✅ |
+| `crates/agentrs-runtime/src/plan_state.rs` | `crates/aion-agent/src/plan/state.rs` | `f711174` | 逐字复制 | ✅ |
+| `crates/agentrs-prompts/src/plan_prompt.rs` | `crates/aion-agent/src/plan/prompt.rs` | `f711174` | 逐字复制 | ✅ |
+| `crates/agentrs-dev-adapter/src/vcr.rs` | `crates/aion-agent/src/vcr.rs` | `f711174` | 落在 dev-adapter（要读写磁盘，testkit 受门禁管）；`anyhow`→`std::io`，去 `tracing`，录制时刻由调用方给 | ✅ |
+| `crates/agentrs-types/src/skill_types.rs` | `crates/aion-types/src/skill_types.rs` | `f711174` | 逐字复制 | ✅ |
+| `crates/agentrs-types/src/file_state.rs` | `crates/aion-types/src/file_state.rs` | `f711174` | 逐字复制 | ✅ |
+| _(技能发现归 Core，不移植)_ | `discovery.rs` / `loader.rs` / `watcher.rs` / `paths.rs` | | 文件在哪、哪层优先、监视变化——按 §1.1 归 Core | 不移植 |
+
+### 经核查后判定不移植
+
+下列模块在 aionrs 中存在，但移植进来会**削弱**本仓库已有的机制。逐条记录，
+免得下一个人再查一遍：
+
+| aionrs 模块 | 不移植的理由 |
+|---|---|
+| `aion-providers/src/retry.rs` | `routing.rs` 已有重试，且 `provider/lib.rs` 有一条更强的不变量：**已产出可见文本后不自动重试**。上游的 `with_retry` 只看 `is_retryable()`，会重复已输出的内容 |
+| `aion-providers/src/tool_call_sanitize.rs` | `legalization.rs`（576 行）覆盖同一职责，且带四条不变量与 manifest 留痕。本仓库移植 `anthropic.rs` 时**已显式剥离** sanitize |
+| `aion-memory/src/{store,index,paths}.rs` | `agentrs-memory` 的边界：索引、权限、保留策略全归 Core，内核只从候选里挑 |
+| `aion-skills/src/{discovery,loader,watcher,paths}.rs` | 同上——文件在哪、哪层优先、监视变化归 Core |
+| `aion-config` 整个 crate | 本仓库配置一律注入，不设配置 crate（架构 §1.1） |
+| `aion-protocol` 整个 crate | 它是 aionrs 与 AionCore 之间的 IPC 契约。本仓库有自己的事件契约与 `serve --jsonl`——移植它等于引入**第二套**互不兼容的对外协议 |
+| `aion-providers/src/{composed,stream_runner,stream_process}.rs` | 内部装配，本仓库的 `transport.rs` + `routing.rs` 已覆盖同一职责 |
+| `aion-providers/src/stream_diagnostics.rs` | 依赖 `reqwest::HeaderMap` 与 `tracing`；本仓库诊断走 `agentrs-observability`，内核库不持有日志设施 |
+| `aion-types/src/spawner.rs` | `ForkOverrides{model,effort,allowed_tools}` 与本仓库 `pack::SkillOverrides` 同形；派生规则归 `agentrs-subagents`，那里带授权校验 |
+| `aion-types/src/file_state.rs` + `aion-tools/src/file_cache.rs` | 读去重缓存依赖文件 mtime，属宿主状态；本仓库 ChangeSet overlay 已保证读己之写 |
+| `aion-skills/src/mcp.rs` | 依赖 `aion_mcp::manager`（进程生命周期）与 `loader`（发现），两者均属 C 类 |
+| `aion-skills/src/hooks.rs` | 依赖 `aion_config::hooks`；本仓库 hooks 走 `HookEvaluator` port，形状不同 |
+| `aion-memory/src/prompt.rs` | 主体是 2,500 token 的提示词正文 + 读盘。提示词归 `agentrs-prompts` 与 Core，不随 memory 移植 |
 
 ### C 类：明确不移植
 

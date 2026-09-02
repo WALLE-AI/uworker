@@ -26,6 +26,8 @@
 
 #![forbid(unsafe_code)]
 
+/// Plan 模式的提示词（自 aionrs 移植）。
+pub mod plan_prompt;
 pub mod lint;
 pub mod registry;
 

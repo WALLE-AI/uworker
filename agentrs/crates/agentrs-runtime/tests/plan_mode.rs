@@ -109,6 +109,7 @@ fn 规格(mode: PermissionMode) -> RunSpec {
             compaction_threshold_pct: 80,
         },
         execution_budget: ExecutionBudget::default(),
+        change_set_id: None,
         checkpoint: None,
         spec_version: SpecVersion(1),
         config: Default::default(),

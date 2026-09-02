@@ -22,7 +22,8 @@ use agentrs_contracts::spec::{
 };
 use agentrs_contracts::version::SpecVersion;
 use agentrs_dev_adapter::{
-    ApprovalAnswer, ApprovalPrompt, InteractiveDevPolicy, JsonlPersistence, LocalFileSandbox,
+    env_tool_catalog, env_tool_names, ApprovalAnswer, ApprovalPrompt, InteractiveDevPolicy,
+    JsonlPersistence, LocalDevSandbox,
 };
 use agentrs_dev_tui::approval::{self, ApprovalOption};
 use agentrs_dev_tui::capabilities;
@@ -55,7 +56,7 @@ use agentrs_runtime::engine::{AdmitAll, EngineDeps, FixedClock, RunSummary, Step
 use agentrs_runtime::host::{RunHandle, RuntimeHost, StartError};
 use agentrs_runtime::inbox::UserInput;
 use agentrs_runtime::toolround::ToolRoundDeps;
-use agentrs_types::{ContentBlock, LlmEvent, LlmRequest, ToolDef};
+use agentrs_types::{ContentBlock, LlmEvent, LlmRequest};
 use crossterm::event::{self, Event, KeyEventKind};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -228,7 +229,7 @@ struct Session {
     event_rx: mpsc::Receiver<agentrs_contracts::event::RunEventEnvelope>,
     approval_rx: mpsc::Receiver<ApprovalPrompt>,
     dropped_live: Arc<std::sync::atomic::AtomicU64>,
-    sandbox: Arc<LocalFileSandbox>,
+    sandbox: Arc<LocalDevSandbox>,
     change_set: String,
 }
 
@@ -245,7 +246,7 @@ async fn start_session(
     provider_config: &ProviderConfig,
     persistence: Arc<JsonlPersistence>,
     origin: Origin,
-    reuse: Option<Arc<LocalFileSandbox>>,
+    reuse: Option<(Arc<LocalDevSandbox>, String)>,
     initial_prompt: Option<&str>,
 ) -> Result<Session, String> {
     let (base_url, model) = provider_config.validate()?;
@@ -253,30 +254,46 @@ async fn start_session(
         OpenAiCompatProvider::new(base_url, provider_config.api_key.clone())
             .map_err(|error| error.to_string())?,
     );
-    // A follow-up turn keeps the same sandbox, so every ChangeSet the session
-    // has opened stays reachable from one place and one `c` can commit them all.
-    // The ChangeSet *id* is still the kernel's to name — a forked Run inherits
-    // no live state (fork rule 5), and staged writes are live state.
-    let sandbox = match &reuse {
-        Some(sandbox) => sandbox.clone(),
-        None => Arc::new(LocalFileSandbox::new(&args.workspace).map_err(|error| error.to_string())?),
+    // A follow-up turn keeps the same sandbox **and the same ChangeSet**.
+    //
+    // A Run is the kernel's unit; a session is the person's. Giving each turn its
+    // own ChangeSet meant turn two could not read what turn one had staged —
+    // overlay is keyed by ChangeSet — so a follow-up like "now fix that file"
+    // read the pre-edit content off disk. One `ctrl+s` also only landed one
+    // turn's worth of it.
+    let (sandbox, reuse_change_set) = match reuse {
+        Some((sandbox, change_set)) => (sandbox, Some(change_set)),
+        None => (
+            Arc::new(LocalDevSandbox::new(&args.workspace).map_err(|error| error.to_string())?),
+            None,
+        ),
     };
     let (approval_tx, approval_rx) = mpsc::channel(8);
+    // 两张表从目录的副作用画像里派生，不手抄工具名——抄漏一个，那个工具就永远
+    // 调不动，而模型只会看到一次次 OutOfAuthority 然后开始换着法子绕。
+    let (auto_allowed, approval_required) =
+        InteractiveDevPolicy::split_by_effect(&env_tool_catalog());
     let policy = Arc::new(
         InteractiveDevPolicy::new(
             sandbox.clone(),
-            ["Read", "Grep"],
-            ["Write", "Edit", "Delete"],
+            auto_allowed,
+            approval_required,
             approval_tx,
             Timestamp(0),
             Duration::from_secs(300),
         )
         .map_err(|error| error.to_string())?,
     );
-    let tool_round = Arc::new(ToolRoundDeps::minimal(
-        policy as Arc<dyn PolicyEnforcer>,
-        sandbox.clone() as Arc<dyn SandboxExecutor>,
-    ));
+    let tool_round = Arc::new(
+        ToolRoundDeps::minimal(
+            policy as Arc<dyn PolicyEnforcer>,
+            sandbox.clone() as Arc<dyn SandboxExecutor>,
+        )
+        // 命令形状 guard。它拦的那几种（sudo、curl … | sh、越界的 rm -rf）
+        // 本来也会走到审批面板上，问题是每条 Bash 都要人点头，点到第三十条时
+        // 一句看起来平平无奇的 `curl … | sh` 就会被随手放行。
+        .with_guard(Arc::new(agentrs_dev_adapter::CommandShapeGuard)),
+    );
     let (event_sink, event_rx, dropped_live) = ChannelEventSink::bounded(512);
     let sink: Arc<dyn RunEventSink> = event_sink;
     let deps = EngineDeps {
@@ -290,12 +307,12 @@ async fn start_session(
         components: None,
     };
     let host = RuntimeHost::new();
-    let tools = tool_catalog();
+    let tools = env_tool_catalog();
 
     let (run_id, started) = match origin {
         Origin::Continue { source, events } => {
             let run_id = agentrs_contracts::ids::RunId::new(format!("tui-{}", uuid::Uuid::now_v7()));
-            let source_spec = run_spec(source.as_str(), model, permission);
+            let source_spec = run_spec(source.as_str(), model, permission, None);
             let forked = agentrs_runtime::fork(
                 &agentrs_contracts::spec::ForkSpec {
                     source_run_id: source,
@@ -308,8 +325,13 @@ async fn start_session(
                 source_spec.authority.clone(),
             )
             .map_err(|error| format!("cannot continue this conversation: {error}"))?;
+            // fork 把 ChangeSet 清成 None，因为该沿用还是另开只有宿主知道
+            // （见 `fork.rs`）。这里就是宿主在说：同一段会话的下一轮，沿用。
+            // 不接这一句，第二轮就读不到第一轮暂存尚未提交的文件。
+            let mut spec = forked.spec;
+            spec.change_set_id = reuse_change_set.clone().map(Into::into);
             let started = host
-                .start_forked(forked.spec, &events, deps, TurnGuards::default(), tools)
+                .start_forked(spec, &events, deps, TurnGuards::default(), tools)
                 .await
                 .map_err(start_error)?;
             (run_id, started)
@@ -322,7 +344,7 @@ async fn start_session(
                 .ok_or("resume log has no events")?;
             let started = host
                 .resume_from_events(
-                    run_spec(run_id.as_str(), model, permission),
+                    run_spec(run_id.as_str(), model, permission, reuse_change_set.as_deref()),
                     recovery.checkpoint,
                     &recovery.events,
                     deps,
@@ -337,7 +359,7 @@ async fn start_session(
             let run_id = agentrs_contracts::ids::RunId::new(format!("tui-{}", uuid::Uuid::now_v7()));
             let started = host
                 .start_with_tools(
-                    run_spec(run_id.as_str(), model, permission),
+                    run_spec(run_id.as_str(), model, permission, reuse_change_set.as_deref()),
                     deps,
                     TurnGuards::default(),
                     tools,
@@ -357,7 +379,7 @@ async fn start_session(
     }
     // Must match what the host gave the engine, or a commit would look in an
     // empty ChangeSet and report nothing staged.
-    let change_set = format!("cs-{run_id}");
+    let change_set = reuse_change_set.unwrap_or_else(|| format!("cs-{run_id}"));
     let handle = started.handle;
     let task = tokio::spawn(started.driver);
     Ok(Session {
@@ -375,16 +397,17 @@ fn start_error(error: StartError) -> String {
     format!("resume/start refused: {error}")
 }
 
-fn run_spec(run_id: &str, model: &str, permission: &PermissionMode) -> RunSpec {
+fn run_spec(
+    run_id: &str,
+    model: &str,
+    permission: &PermissionMode,
+    change_set: Option<&str>,
+) -> RunSpec {
     let provider = agentrs_contracts::ids::ProviderId::new("openai-compat");
     let model_id = agentrs_contracts::ids::ModelId::new(model);
-    let tools = vec![
-        "Read".into(),
-        "Grep".into(),
-        "Write".into(),
-        "Edit".into(),
-        "Delete".into(),
-    ];
+    // 与目录同一处来源：授权清单少写一个名字，那个工具就永远调不动，
+    // 而症状是模型不断提出一个被静默拒绝的调用。
+    let tools = env_tool_names();
     RunSpec {
         run_id: run_id.into(),
         parent_run_id: None,
@@ -425,64 +448,11 @@ fn run_spec(run_id: &str, model: &str, permission: &PermissionMode) -> RunSpec {
             compaction_threshold_pct: 80,
         },
         execution_budget: ExecutionBudget::default(),
+        change_set_id: change_set.map(Into::into),
         checkpoint: None,
         spec_version: SpecVersion(1),
         config: Default::default(),
     }
-}
-
-fn tool_catalog() -> Vec<ToolDef> {
-    vec![
-        ToolDef::read_only(
-            "Read",
-            "Read a UTF-8 text file inside the workspace.",
-            serde_json::json!({
-                "type":"object",
-                "properties":{"path":{"type":"string"}},
-                "required":["path"]
-            }),
-        ),
-        ToolDef::read_only(
-            "Grep",
-            "Search workspace text files for a literal substring.",
-            serde_json::json!({
-                "type":"object",
-                "properties":{"pattern":{"type":"string"}},
-                "required":["pattern"]
-            }),
-        ),
-        ToolDef::mutating(
-            "Write",
-            "Stage complete file content in the current ChangeSet.",
-            serde_json::json!({
-                "type":"object",
-                "properties":{"path":{"type":"string"},"content":{"type":"string"}},
-                "required":["path","content"]
-            }),
-        ),
-        ToolDef::mutating(
-            "Edit",
-            "Replace every occurrence of old with new in a workspace file, staged in the ChangeSet.",
-            serde_json::json!({
-                "type":"object",
-                "properties":{
-                    "path":{"type":"string"},
-                    "old":{"type":"string"},
-                    "new":{"type":"string"}
-                },
-                "required":["path","old","new"]
-            }),
-        ),
-        ToolDef::mutating(
-            "Delete",
-            "Stage deletion of one workspace file in the current ChangeSet.",
-            serde_json::json!({
-                "type":"object",
-                "properties":{"path":{"type":"string"}},
-                "required":["path"]
-            }),
-        ),
-    ]
 }
 
 fn load_recovery(persistence: &JsonlPersistence) -> Result<(RecoveryInput, AppState), Box<dyn Error>> {
@@ -1035,7 +1005,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 app.track_change_set(&started.change_set);
                 session = Some(started);
             }
-            Err(error) => app.notify(Notice::keyed("start", error).error()),
+            Err(error) => app.notify(Notice::keyed("start", error).error().immediate()),
         }
     }
 
@@ -1140,6 +1110,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let Some(chord) = Chord::from_event(&key) else {
                         continue;
                     };
+                    // 原样的字符，未经和弦归一化——大小写要打得出来。
+                    let typed = match key.code {
+                        crossterm::event::KeyCode::Char(ch) => Some(ch),
+                        _ => None,
+                    };
                     let context = app.context();
                     let action = app.keymap.resolve(context, chord);
                     handle_key(
@@ -1150,6 +1125,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         &mut session,
                         context,
                         chord,
+                        typed,
                         action,
                     )
                     .await?;
@@ -1196,10 +1172,11 @@ async fn handle_key(
     session: &mut Option<Session>,
     context: Context,
     chord: Chord,
+    typed: Option<char>,
     action: Option<Action>,
 ) -> Result<(), Box<dyn Error>> {
     if app.overlay.is_some() {
-        handle_overlay_key(app, args, provider, persistence, session, chord, action).await;
+        handle_overlay_key(app, args, provider, persistence, session, chord, typed, action).await;
         return Ok(());
     }
 
@@ -1286,6 +1263,7 @@ async fn handle_key(
                     session,
                     context,
                     chord,
+                    None,
                     Some(Action::CompletionAccept),
                 ))
                 .await;
@@ -1331,6 +1309,7 @@ async fn handle_key(
                     session,
                     context,
                     chord,
+                    None,
                     Some(command_action),
                 ))
                 .await;
@@ -1618,8 +1597,13 @@ async fn handle_key(
             }
         }
         // A character with no binding is what the user meant to type.
+        //
+        // The character comes from the key event, **not** from the chord: a
+        // chord is normalized to lowercase so `A` and `a` look up the same
+        // binding, and inserting `chord.key` made it impossible to type a
+        // capital letter at all.
         _ => {
-            if let Key::Char(ch) = chord.key {
+            if let Some(ch) = typed {
                 if !chord.ctrl && !chord.alt {
                     app.composer.insert(&ch.to_string());
                 }
@@ -1634,6 +1618,11 @@ async fn handle_key(
 }
 
 /// Applies one key while a full-screen surface is open.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the loop owns the state this needs; bundling it into a struct would \
+              only move the same fields behind one more name"
+)]
 async fn handle_overlay_key(
     app: &mut App,
     args: &Args,
@@ -1641,6 +1630,7 @@ async fn handle_overlay_key(
     persistence: &mut Arc<JsonlPersistence>,
     session: &mut Option<Session>,
     chord: Chord,
+    typed: Option<char>,
     action: Option<Action>,
 ) {
     let Some(overlay) = app.overlay.as_mut() else {
@@ -1740,10 +1730,13 @@ async fn handle_overlay_key(
         }
         // A searching surface only takes typing while the search is open, so
         // `n` and `q` keep working over the transcript.
-        Key::Char(ch)
-            if !chord.ctrl && !chord.alt && (!surface.searches() || app.overlay_searching) =>
+        Key::Char(_)
+            if typed.is_some()
+                && !chord.ctrl
+                && !chord.alt
+                && (!surface.searches() || app.overlay_searching) =>
         {
-            overlay.push_query(ch);
+            overlay.push_query(typed.expect("checked above"));
         }
         _ => {}
     }
@@ -1776,6 +1769,7 @@ async fn accept_surface(
                 session,
                 context,
                 Chord::plain(Key::Escape),
+                None,
                 Some(action),
             ))
             .await;
@@ -1990,7 +1984,7 @@ async fn submit_text(
                     return;
                 }
             };
-            let reuse = Some(active.sandbox.clone());
+            let reuse = Some((active.sandbox.clone(), active.change_set.clone()));
             // Each Run owns its own log: two runs in one file would share a
             // sequence counter and make `--resume` read one run's history as
             // another's.
@@ -2023,7 +2017,7 @@ async fn submit_text(
                     *persistence = opened;
                     *session = Some(started);
                 }
-                Err(error) => app.notify(Notice::keyed("start", error).error()),
+                Err(error) => app.notify(Notice::keyed("start", error).error().immediate()),
             }
         }
         None => {
@@ -2044,7 +2038,7 @@ async fn submit_text(
                     app.track_change_set(&started.change_set);
                     *session = Some(started);
                 }
-                Err(error) => app.notify(Notice::keyed("start", error).error()),
+                Err(error) => app.notify(Notice::keyed("start", error).error().immediate()),
             }
         }
     }

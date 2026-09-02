@@ -3,8 +3,14 @@
 //! ## 五个不可绕过的固定阶段
 //!
 //! ```text
-//! schema 校验 → ★StepIntent → ★Policy/grant → ★Sandbox → ★StepResult
+//! ★StepIntent → schema 校验 → guard → Hook → ★Policy/grant → ★Sandbox → ★StepResult
 //! ```
+//!
+//! schema 校验排在 `StepIntent` **之后**而不是之前，这与直觉相反，理由是单一出口：
+//! 每条拒绝路径都必须有 `StepResult` 与之配对，否则 `ToolPaths` 投影会把它们误判成
+//! "有意图无结果"，恢复时逐个去 reconcile 一件根本没发生的事（架构 §18.4）。
+//! 畸形提议**也是提议**，把它记下来正是"为什么这个 Step 什么也没做"能被回答的原因。
+//! 它不跨任何副作用边界，所以先落盘再校验没有代价。
 //!
 //! ★ 表示不可绕过。middleware 只能环绕非授权关注点，**不得**改变授权结论、
 //! 跳过或重排任何固定阶段、延长 grant 有效期或抑制 `StepResult` 提交。
@@ -38,6 +44,7 @@ use agentrs_contracts::ports::{
 };
 use agentrs_contracts::sandbox::{ExecutionOutcome, ExecutionRequest, IsolationLevel};
 use agentrs_contracts::{StepIntent, StepOutcome as StepResultOutcome, StepResult};
+use agentrs_types::ToolDef;
 
 /// 模型提出的一次调用（已通过 schema 校验）。
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +84,11 @@ pub struct ToolRoundDeps {
     pub guards: Vec<Arc<dyn ToolGuard>>,
     /// 宿主 Hook。缺省为 `None`，此时视同全部 `Proceed`。
     pub hooks: Option<Arc<dyn HookEvaluator>>,
+    /// 本 Run 的工具目录，用于 schema 校验与"没这个工具"的判定。
+    ///
+    /// 空目录表示**不校验**：装配方没有交出目录时，凭空拒绝一切调用比放过畸形
+    /// 参数更糟。引擎恒会交（`with_tools` 之后按权限模式投影过的那一份）。
+    pub catalog: Vec<ToolDef>,
 }
 
 impl ToolRoundDeps {
@@ -87,8 +99,49 @@ impl ToolRoundDeps {
             sandbox,
             guards: Vec::new(),
             hooks: None,
+            catalog: Vec::new(),
         }
     }
+
+    /// 交出本 Run 的工具目录。
+    pub fn with_catalog(mut self, catalog: Vec<ToolDef>) -> Self {
+        self.catalog = catalog;
+        self
+    }
+
+    /// 装上一个 guard。可以叠加；它们**只能让结论更严**（见 [`ToolGuard`]）。
+    pub fn with_guard(mut self, guard: Arc<dyn ToolGuard>) -> Self {
+        self.guards.push(guard);
+        self
+    }
+}
+
+/// 校验一次调用的参数，返回该回灌给模型的错误消息。
+///
+/// 两类问题：目录里没有这个工具，或者参数不符合它的 schema。两者都是**模型说了句
+/// 不合语法的话**，不是任何一层的策略拒绝——所以结局是 `Failed` 而不是 `Denied`，
+/// 让它读到错误自己改正，这正是"工具错误作为结构化结果回灌"这条设计的用途。
+fn check_schema(catalog: &[ToolDef], call: &ProposedCall) -> Option<String> {
+    if catalog.is_empty() {
+        return None;
+    }
+    let Some(def) = catalog.iter().find(|tool| tool.name == call.tool_name) else {
+        let mut names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+        names.sort_unstable();
+        return Some(format!(
+            "没有名为 {} 的工具；可用的是：{}",
+            call.tool_name,
+            names.join("、")
+        ));
+    };
+    let violations = agentrs_types::validate(&def.parameters, &call.arguments);
+    (!violations.is_empty()).then(|| {
+        format!(
+            "{} 的参数不合法——{}",
+            call.tool_name,
+            agentrs_types::describe_all(&violations)
+        )
+    })
 }
 
 /// 单调 guard。
@@ -254,6 +307,23 @@ async fn execute_call_inner(
         intent: Box::new(intent.clone()),
     });
 
+    // ---- 收紧点 A′：schema 校验 ----
+    // 管线的第一道关口。放在 intent 之后是为了保住单一出口（见模块文档）。
+    if let Some(message) = check_schema(&deps.catalog, call) {
+        return Ok((
+            intent.clone(),
+            StepResult {
+                step_id: ctx.step_id.clone(),
+                call_id: call.call_id.clone(),
+                outcome: StepResultOutcome::Failed { message },
+                effective_isolation: None,
+                artifacts: Vec::new(),
+                output: None,
+                at: ctx.now,
+            },
+        ));
+    }
+
     // ---- 收紧点 A：单调 guard ----
     // 在 Policy 之前。任一 guard 拒绝即拒绝，**不做投票、不做多数决**——
     // 单调性的含义就是"任何一票否决都算数"。
@@ -382,15 +452,22 @@ async fn execute_call_inner(
                 output: r.output,
                 at: ctx.now,
             },
+            // 失败时**必须把工具自己的话带上**。从前这里只写 `exit_code=1`，
+            // 于是"old 在 a.md 里命中 2 处，请补足上下文"这类话在到达模型之前
+            // 就被扔了——模型看到的是一个数字，只能原样重试同一个错误。
+            // 退出码留在末尾：它是稳定的、可比对的，而说明是给人和模型看的。
             ExecutionOutcome::Completed { exit_code } => StepResult {
                 step_id: ctx.step_id.clone(),
                 call_id: call.call_id.clone(),
                 outcome: StepResultOutcome::Failed {
-                    message: format!("exit_code={exit_code}"),
+                    message: match r.output.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        Some(said) => format!("{said}（exit_code={exit_code}）"),
+                        None => format!("exit_code={exit_code}"),
+                    },
                 },
                 effective_isolation: Some(r.effective_isolation),
                 artifacts: r.artifacts,
-                output: None,
+                output: r.output,
                 at: ctx.now,
             },
             ExecutionOutcome::Canceled => StepResult {
@@ -402,23 +479,35 @@ async fn execute_call_inner(
                 output: None,
                 at: ctx.now,
             },
+            // 超时也要把工具的话与**已经产出的那部分输出**带上。从前这里写死
+            // `timed_out` 并把 output 丢掉，于是一条打印了五百行然后卡住的构建，
+            // 模型只看得到"timed_out"——恰恰看不到它卡在哪一步。
             ExecutionOutcome::TimedOut => StepResult {
                 step_id: ctx.step_id.clone(),
                 call_id: call.call_id.clone(),
                 outcome: StepResultOutcome::Failed {
-                    message: "timed_out".into(),
+                    message: match r.output.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        Some(said) => format!("{said}（timed_out）"),
+                        None => "timed_out".into(),
+                    },
                 },
                 effective_isolation: Some(r.effective_isolation),
-                artifacts: vec![],
-                output: None,
+                artifacts: r.artifacts,
+                output: r.output,
                 at: ctx.now,
             },
+            // 拒绝同理。`{reason:?}` 只是一个稳定码；执行器往往还附了一句说明
+            // （"本机无法兑现 L0 基础围栏，缺：默认断网"），而那句才告诉模型
+            // 这条路走不通是因为什么、要不要换条路。
             ExecutionOutcome::Rejected { reason } => StepResult {
                 step_id: ctx.step_id.clone(),
                 call_id: call.call_id.clone(),
                 outcome: StepResultOutcome::Denied {
                     code: DenyCode::GuardDenied,
-                    message: format!("{reason:?}"),
+                    message: match r.output.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        Some(said) => format!("{said}（{reason:?}）"),
+                        None => format!("{reason:?}"),
+                    },
                 },
                 effective_isolation: Some(r.effective_isolation),
                 artifacts: vec![],
@@ -542,6 +631,103 @@ mod tests {
         (ToolRoundDeps::minimal(Arc::new(policy), sandbox.clone()), sandbox)
     }
 
+    fn 目录() -> Vec<ToolDef> {
+        vec![
+            ToolDef::read_only(
+                "Read",
+                "读文件",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+            ),
+            ToolDef::mutating("Write", "写文件", serde_json::json!({"type": "object"})),
+        ]
+    }
+
+    #[tokio::test]
+    async fn 参数不合法在跨出副作用边界之前就被挡下() {
+        let (mut deps, sandbox) = 依赖(FakePolicy::allow_all());
+        deps.catalog = 目录();
+        let mut call = 调用();
+        call.tool_name = "Read".into();
+        call.arguments = serde_json::json!({});
+        let mut events = Vec::new();
+        let (_, result) = execute_call(&deps, &上下文(), &call, &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+
+        // 结局是 Failed 而不是 Denied：模型说了句不合语法的话，不是任何一层拒绝了它。
+        match result.outcome {
+            StepResultOutcome::Failed { ref message } => {
+                assert!(message.contains("path"), "{message}");
+                assert!(message.contains("必填"), "{message}");
+            }
+            other => panic!("期望 Failed，得到 {other:?}"),
+        }
+        assert_eq!(sandbox.execution_count(), 0, "畸形调用不该跨出副作用边界");
+    }
+
+    #[tokio::test]
+    async fn 畸形调用仍然留下意图与结果这一对() {
+        // 单一出口：任何拒绝路径都必须有 StepResult 与 StepIntent 配对，
+        // 否则投影会把它误判成"有意图无结果"、恢复时去 reconcile 一件没发生的事。
+        let (mut deps, _) = 依赖(FakePolicy::allow_all());
+        deps.catalog = 目录();
+        let mut call = 调用();
+        call.tool_name = "Read".into();
+        call.arguments = serde_json::json!({"path": 7});
+        let mut events = Vec::new();
+        execute_call(&deps, &上下文(), &call, &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+        let 类型: Vec<&str> = events
+            .iter()
+            .map(|e| match e {
+                EventPayload::ToolProposed { .. } => "proposed",
+                EventPayload::StepIntentRecorded { .. } => "intent",
+                EventPayload::StepResultRecorded { .. } => "result",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(类型, vec!["proposed", "intent", "result"]);
+    }
+
+    #[tokio::test]
+    async fn 目录里没有的工具当场说清楚可用的是哪些() {
+        let (mut deps, sandbox) = 依赖(FakePolicy::allow_all());
+        deps.catalog = 目录();
+        let mut call = 调用();
+        call.tool_name = "Teleport".into();
+        let mut events = Vec::new();
+        let (_, result) = execute_call(&deps, &上下文(), &call, &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+        match result.outcome {
+            StepResultOutcome::Failed { ref message } => {
+                assert!(message.contains("Teleport"), "{message}");
+                assert!(message.contains("Read"), "要告诉它有什么可用：{message}");
+            }
+            other => panic!("期望 Failed，得到 {other:?}"),
+        }
+        assert_eq!(sandbox.execution_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn 空目录表示不校验() {
+        // 装配方没交出目录时，凭空拒绝一切调用比放过畸形参数更糟。
+        let (deps, sandbox) = 依赖(FakePolicy::allow_all());
+        assert!(deps.catalog.is_empty());
+        // 这个调用的工具名不在任何目录里；目录为空时它照样应当执行。
+        let mut events = Vec::new();
+        execute_call(&deps, &上下文(), &调用(), &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+        assert_eq!(sandbox.execution_count(), 1);
+    }
+
     #[test]
     fn 输入指纹覆盖_change_set() {
         // 同一命令在不同 ChangeSet 上是不同的意图。
@@ -602,6 +788,66 @@ mod tests {
             .position(|e| matches!(e, EventPayload::StepIntentRecorded { .. }));
         assert_eq!(intent_pos, Some(1), "意图必须紧跟提议，先于任何裁决");
         assert!(matches!(result.outcome, StepResultOutcome::Denied { .. }));
+    }
+
+    #[tokio::test]
+    async fn 工具失败时它自己的话要带到模型面前() {
+        // 从前这里只写 exit_code=1，于是"命中 2 处，请补足上下文"这类唯一能指导
+        // 改正的信息在到达模型之前就被扔了。
+        let (deps, sandbox) = 依赖(FakePolicy::allow_all());
+        sandbox.script(ScriptedExecution::Succeed {
+            exit_code: 1,
+            output: Some("old 在 a.md 里命中 2 处，必须唯一".into()),
+        });
+        let mut events = Vec::new();
+        let (_, result) = execute_call(&deps, &上下文(), &调用(), &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+        match result.outcome {
+            StepResultOutcome::Failed { ref message } => {
+                assert!(message.contains("命中 2 处"), "{message}");
+                assert!(message.contains("exit_code=1"), "稳定码也要留着：{message}");
+            }
+            other => panic!("期望 Failed，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn 超时也要带上被杀之前那部分输出() {
+        // 与上一条同源，只是走的是另一条分支——而那条分支从前写死 `timed_out`
+        // 并把 output 整个丢掉。一条打印了五百行然后卡住的构建，模型于是
+        // 只看得到 "timed_out"，恰恰看不到它卡在哪一步。
+        let (deps, sandbox) = 依赖(FakePolicy::allow_all());
+        sandbox.script(ScriptedExecution::TimeOut {
+            output: Some("Compiling serde v1.0.0\nCompiling tokio v1.53.1".into()),
+        });
+        let mut events = Vec::new();
+        let (_, result) = execute_call(&deps, &上下文(), &调用(), &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+        let StepResultOutcome::Failed { ref message } = result.outcome else {
+            panic!("期望 Failed，得到 {:?}", result.outcome);
+        };
+        assert!(message.contains("Compiling tokio"), "{message}");
+        assert!(message.contains("timed_out"), "稳定码也要留着：{message}");
+        // artifacts/output 同样不能丢：卡住之前的产物照样是产物。
+        assert!(result.output.is_some());
+    }
+
+    #[tokio::test]
+    async fn 没有输出时超时仍只报稳定码() {
+        let (deps, sandbox) = 依赖(FakePolicy::allow_all());
+        sandbox.script(ScriptedExecution::TimeOut { output: None });
+        let mut events = Vec::new();
+        let (_, result) = execute_call(&deps, &上下文(), &调用(), &mut |e| events.push(e))
+            .await
+            .expect("不是审批挂起");
+        assert_eq!(
+            result.outcome,
+            StepResultOutcome::Failed {
+                message: "timed_out".into()
+            }
+        );
     }
 
     #[tokio::test]

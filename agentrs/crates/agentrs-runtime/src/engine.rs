@@ -321,6 +321,13 @@ pub struct Engine {
     usage: Mutex<TokenUsage>,
     /// 模型可见的工具目录。**只追加不重排**（缓存前缀 S1 段）。
     tool_catalog: Vec<agentrs_types::ToolDef>,
+    /// 未经权限模式投影的完整目录。
+    ///
+    /// schema 校验与 [`ModeGuard`](crate::permission::ModeGuard) 都要它，理由同一条：
+    /// 得能区分"这个工具不存在"与"存在但当前模式不允许"。拿投影后的目录去校验，
+    /// Plan 模式下的一次写调用会被报成"没有这个工具"，而正确的答复是
+    /// "Write 在只读探索模式下不可用"。
+    full_catalog: Vec<agentrs_types::ToolDef>,
     required_isolation: agentrs_contracts::sandbox::IsolationLevel,
     /// 当前权限模式。切换只在 Turn 边界发生（§4.1.2 规则 2）。
     permission_mode: agentrs_contracts::authority::PermissionMode,
@@ -373,6 +380,7 @@ impl Engine {
             prepared_context: Mutex::new(None),
             usage: Mutex::new(TokenUsage::default()),
             tool_catalog: Vec::new(),
+            full_catalog: Vec::new(),
             permission_mode: agentrs_contracts::authority::PermissionMode::Default,
             mode_guard: None,
             prev_cache: Mutex::new(None),
@@ -408,6 +416,7 @@ impl Engine {
 
     /// 设置模型可见的工具目录。
     pub fn with_tools(mut self, tools: Vec<agentrs_types::ToolDef>) -> Self {
+        self.full_catalog.clone_from(&tools);
         self.tool_catalog = tools;
         self
     }
@@ -1293,19 +1302,19 @@ impl Engine {
         // 把模式 guard 叠加到宿主提供的 guard 之上。
         // **叠加而不是替换**——宿主的 guard 与模式 guard 都只能收紧，
         // 两者取并集仍然是收紧，顺序不影响结论。
-        let tools = match &self.mode_guard {
-            None => host_tools,
-            Some(g) => {
-                let mut guards = host_tools.guards.clone();
-                guards.push(g.clone());
-                Arc::new(crate::toolround::ToolRoundDeps {
-                    policy: host_tools.policy.clone(),
-                    sandbox: host_tools.sandbox.clone(),
-                    guards,
-                    hooks: host_tools.hooks.clone(),
-                })
-            }
-        };
+        // 目录由引擎交，而不是沿用宿主装配时给的那一份：schema 校验必须对着
+        // **模型实际被展示过的**那份目录进行。
+        let mut guards = host_tools.guards.clone();
+        if let Some(g) = &self.mode_guard {
+            guards.push(g.clone());
+        }
+        let tools = Arc::new(crate::toolround::ToolRoundDeps {
+            policy: host_tools.policy.clone(),
+            sandbox: host_tools.sandbox.clone(),
+            guards,
+            hooks: host_tools.hooks.clone(),
+            catalog: self.full_catalog.clone(),
+        });
 
         let ctx = crate::toolround::ToolRoundCtx {
             step_id: c

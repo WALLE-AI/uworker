@@ -14,7 +14,14 @@ cd "$(dirname "$0")/.."
 #   std::process::Command  → 派生进程 = 执行权，禁止
 #   std::process::exit     → 进程退出，不构成执行权，允许（CLI 需要退出码）
 patterns='std::fs::|std::process::Command|std::process::abort|tokio::fs::|tokio::process::'
-net_patterns='std::net::|reqwest::'
+# 禁的是**套接字**，不是 std::net 整个模块：地址是数据，套接字才是能力。
+#   std::net::IpAddr / SocketAddr / Ipv4Addr → 纯数据类型，拿不到任何东西，允许
+#   std::net::TcpStream / TcpListener / UdpSocket → 能连出去，禁止
+# 这与 clippy.toml 的口径一致——那里从来只禁 TcpStream，没禁整个模块。
+# 从前这条是 `std::net::`，于是 `agentrs-tools` 里"哪些网段不许去"这类判定
+# 也被一并拦下，而那恰恰是内核最该有主张的地方（SSRF 判定属于工具语义，
+# 执行属于宿主）。
+net_patterns='std::net::TcpStream|std::net::TcpListener|std::net::UdpSocket|reqwest::'
 
 # agentrs-dev-tui/src/host_io.rs 是第三处豁免，粒度是**单个文件**而不是整个 crate：
 # 交互宿主确实需要时钟、配置文件与 $EDITOR，但把它们收进一个文件之后，

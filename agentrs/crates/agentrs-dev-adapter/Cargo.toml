@@ -9,13 +9,23 @@ description = "AgentRS: 开发用参考 adapter —— 本地 JSONL 持久化、
 [dependencies]
 agentrs-contracts = { workspace = true }
 agentrs-types = { workspace = true }
+# 工具的声明、编排与措辞都在这里；本 crate 只提供它注入的三个端口
+# （WorkspaceIo / Shell / Http）的实现，也就是真正碰 OS 的那部分。
+agentrs-tools = { workspace = true }
+# ToolGuard 是 runtime 的扩展点，而"这条命令是什么形状"只有执行它的人知道，
+# 所以 guard 与执行器放在一起。runtime 不依赖本 crate（宿主才装配两者），无环。
+agentrs-runtime = { path = "../agentrs-runtime" }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
-tokio = { version = "1", features = ["sync", "time"] }
+# process/io-util：L0 命令执行；net：SSRF 判定要在连接前自己解析一次域名。
+tokio = { version = "1", features = ["sync", "time", "process", "io-util", "net", "rt"] }
+# WebFetch/WebSearch。与 provider 不同的是这里**不**关代理——取的是外网。
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 tempdir = "0.3"
 agentrs-testkit = { path = "../agentrs-testkit" }
 

@@ -20,6 +20,8 @@
 
 #![forbid(unsafe_code)]
 
+/// Plan 模式的状态机（自 aionrs 移植）。
+pub mod plan_state;
 pub mod composition;
 pub mod engine;
 pub mod fork;

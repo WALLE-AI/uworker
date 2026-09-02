@@ -17,13 +17,13 @@ use agentrs_contracts::policy::{
 use agentrs_contracts::ports::PolicyEnforcer;
 use async_trait::async_trait;
 
-use crate::sandbox::LocalFileSandbox;
+use crate::sandbox::LocalDevSandbox;
 
 /// 开发用策略。
 pub struct DevPolicy {
     /// 允许的工具名。**不在名单内一律拒绝**，而不是反过来。
     allowed: HashSet<String>,
-    sandbox: Arc<LocalFileSandbox>,
+    sandbox: Arc<LocalDevSandbox>,
     next_grant: AtomicU64,
     /// 签发时刻。**由宿主从 Clock port 取得后传入**，内核与 adapter 都不读真实时钟。
     now: Timestamp,
@@ -31,9 +31,12 @@ pub struct DevPolicy {
 
 impl DevPolicy {
     /// 用显式 allowlist 构造。
-    pub fn new(sandbox: Arc<LocalFileSandbox>, allowed: impl IntoIterator<Item = &'static str>) -> Self {
+    pub fn new(
+        sandbox: Arc<LocalDevSandbox>,
+        allowed: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self {
-            allowed: allowed.into_iter().map(str::to_string).collect(),
+            allowed: allowed.into_iter().map(Into::into).collect(),
             sandbox,
             now: Timestamp(0),
             next_grant: AtomicU64::new(0),
@@ -123,7 +126,7 @@ mod tests {
 
     fn 策略() -> (DevPolicy, tempdir::TempDir) {
         let dir = tempdir::TempDir::new("agentrs-policy").unwrap();
-        let sb = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let sb = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
         (DevPolicy::new(sb, ["Read", "Write"]), dir)
     }
 

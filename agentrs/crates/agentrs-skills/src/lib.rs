@@ -5,12 +5,20 @@
 //!
 //! - ✅ [`modifier`] `ContextModifier` 的单调收窄合并
 //! - ✅ [`placement`] 缓存落位与"中途改 S0 推迟到压缩边界"
-//! - ⬜ B 类移植：技能发现与内容包解析（归 Core 的部分不移植）
+//! - ✅ [`pack`] 内容包：frontmatter 解析、参数替换、放行判定、清单排版、
+//!   条件激活、收窄桥接（自 aionrs 移植）
+//! - ⬜ 技能发现（**归 Core，不移植**）：文件在哪、哪层优先、要不要监视变化
+
 
 #![forbid(unsafe_code)]
 
 pub mod modifier;
+pub mod pack;
 pub mod placement;
 
 pub use modifier::{merge_all, ContextModifier, ContextView, Merged, Narrowing};
+pub use pack::{
+    format_within_budget, overrides_of, parse_pack, parse_skill_fields, ParseOutcome,
+    substitute, substitute_for, ConditionalSkills, SkillMetadata, SkillPermission, SkillPermissionChecker,
+};
 pub use placement::{defer_to_boundary, Contribution, Moment, Placement, SkillRef};

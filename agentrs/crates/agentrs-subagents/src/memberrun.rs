@@ -206,6 +206,7 @@ mod tests {
                     compaction_threshold_pct: 80,
                 },
                 execution_budget: ExecutionBudget::default(),
+                change_set_id: None,
                 checkpoint: Some(agentrs_contracts::spec::RunCheckpoint {
                     spec_version: SpecVersion(1),
                     up_to_seq: agentrs_contracts::ids::EventSequence(1),

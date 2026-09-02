@@ -13,6 +13,7 @@ repository = "https://github.com/uworker/agentrs"
 # Internal
 agentrs-contracts = { path = "crates/agentrs-contracts" }
 agentrs-types = { path = "crates/agentrs-types" }
+agentrs-tools = { path = "crates/agentrs-tools" }
 
 # Serialization — contracts are serde-stable by definition
 serde = { version = "1", features = ["derive"] }

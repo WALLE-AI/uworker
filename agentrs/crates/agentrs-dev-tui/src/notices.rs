@@ -245,7 +245,16 @@ impl NoticeQueue {
         // pile up at its head, and `insert` places an equal priority after them
         // — so the newest answer would queue behind a growing stack of stale
         // ones, and a run of commands would show its answers in reverse.
-        if notice.priority == Priority::Immediate {
+        // Priority, not recency — including against whatever is already showing.
+        // Without this the rule only held *within* the queue: a low ambient note
+        // that happened to arrive first kept the row for its full eight seconds,
+        // and the warning that the provider is not configured waited behind it.
+        // The reader pressed enter, nothing happened, and nothing said why.
+        let outranks = self
+            .current
+            .as_ref()
+            .is_some_and(|held| notice.priority > held.priority);
+        if notice.priority == Priority::Immediate || outranks {
             let displaced = self.current.take();
             self.expires_at_ms = Some(now_ms + notice.timeout_ms);
             self.current = Some(notice);
@@ -307,15 +316,42 @@ mod tests {
     #[test]
     fn priority_beats_arrival_order() {
         let mut notices = queue();
-        notices.push(Notice::keyed("a", "ambient").with_priority(Priority::Low), 0);
-        notices.push(Notice::keyed("b", "warning").with_priority(Priority::High), 0);
-        notices.push(Notice::keyed("c", "also ambient").with_priority(Priority::Low), 0);
-        // `a` took the free row; `b` outranks `c` behind it.
-        assert_eq!(notices.current().unwrap().key, "a");
+        // Something high holds the row, so the rest have to queue.
+        notices.push(Notice::keyed("held", "warning").with_priority(Priority::High), 0);
+        notices.push(Notice::keyed("low", "ambient").with_priority(Priority::Low), 0);
+        notices.push(Notice::keyed("mid", "worth reading").with_priority(Priority::Medium), 0);
+        assert_eq!(notices.current().unwrap().key, "held");
+        // Behind it, the higher of the two waiting goes first even though it
+        // arrived last.
         notices.tick(DEFAULT_NOTICE_MS + 1);
-        assert_eq!(notices.current().unwrap().key, "b");
+        assert_eq!(notices.current().unwrap().key, "mid");
         notices.tick(DEFAULT_NOTICE_MS * 2 + 2);
-        assert_eq!(notices.current().unwrap().key, "c");
+        assert_eq!(notices.current().unwrap().key, "low");
+    }
+
+    #[test]
+    fn a_warning_does_not_wait_behind_an_ambient_note() {
+        // The module's rule is "priority, not recency". It only held inside the
+        // queue: whatever grabbed the row first kept it, so "provider config
+        // incomplete" sat behind a capability note for eight seconds while the
+        // reader wondered why enter did nothing.
+        let mut notices = queue();
+        notices.push(Notice::keyed("cap", "tmux detected").with_priority(Priority::Low), 0);
+        notices.push(Notice::keyed("provider", "provider config incomplete").error(), 10);
+        assert_eq!(notices.current().unwrap().key, "provider");
+        // The ambient note is not lost; it returns once the warning has been read.
+        notices.tick(10 + DEFAULT_NOTICE_MS + 1);
+        assert_eq!(notices.current().unwrap().key, "cap");
+    }
+
+    #[test]
+    fn an_equal_priority_note_waits_its_turn() {
+        // Only a *higher* priority takes the row. Equal priorities keep their
+        // arrival order, so a burst still reads as a sequence.
+        let mut notices = queue();
+        notices.push(Notice::keyed("a", "first").with_priority(Priority::Medium), 0);
+        notices.push(Notice::keyed("b", "second").with_priority(Priority::Medium), 1);
+        assert_eq!(notices.current().unwrap().key, "a");
     }
 
     #[test]
@@ -384,7 +420,8 @@ mod tests {
         // what the user just did and must be seen now, not after the ambient
         // notice ahead of it has run its eight seconds.
         let mut notices = queue();
-        notices.push(Notice::keyed("ambient", "capability warning"), 0);
+        // Equal priority, so the error genuinely waits rather than displacing.
+        notices.push(Notice::keyed("ambient", "capability warning").error(), 0);
         notices.push(Notice::keyed("permission", "unknown preset").error(), 0);
         assert_eq!(notices.current().unwrap().key, "ambient");
         notices.push(Notice::keyed("permission", "permission plan").immediate(), 10);

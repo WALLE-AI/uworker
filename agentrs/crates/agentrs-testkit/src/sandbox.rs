@@ -23,17 +23,29 @@ use async_trait::async_trait;
 /// 一次执行在 fake 中的编排结果。
 #[derive(Debug, Clone)]
 pub enum ScriptedExecution {
-    /// 正常完成。
+    /// 完成，带退出码与工具自己的输出。
+    ///
+    /// `output` 不是装饰：工具**失败时说的那句话**是模型唯一能据以改正的线索，
+    /// 而 fake 若表达不出它，"这句话有没有被送到模型面前"就无从测起。
     Succeed {
         /// 退出码。
         exit_code: i32,
+        /// 工具的输出，成功与失败都可能有。
+        output: Option<String>,
     },
     /// 执行到一半"崩溃"——不返回结果，后续 `reconcile` 报告指定状态。
     ///
     /// 这是崩溃注入的核心：内核必须**先 reconcile 再决定**，不能盲目重跑。
     CrashThen(ExecutionStatus),
-    /// 超时。
-    TimeOut,
+    /// 超时，可携带**被杀掉之前已经产出的那部分输出**。
+    ///
+    /// 与 [`Self::Succeed`] 的 `output` 同一理由：一条打印了五百行然后卡住的
+    /// 构建，那五百行恰恰是"卡在哪一步"的唯一线索。fake 表达不出它，
+    /// "超时的部分输出有没有送到模型面前"就无从测起。
+    TimeOut {
+        /// 强杀之前收到的输出。
+        output: Option<String>,
+    },
 }
 
 #[derive(Default)]
@@ -176,27 +188,30 @@ impl SandboxExecutor for FakeSandbox {
         s.executed.push(request.clone());
 
         let scripted = if s.script.is_empty() {
-            ScriptedExecution::Succeed { exit_code: 0 }
+            ScriptedExecution::Succeed {
+                exit_code: 0,
+                output: None,
+            }
         } else {
             s.script.remove(0)
         };
 
         match scripted {
-            ScriptedExecution::Succeed { exit_code } => Ok(ExecutionResult {
+            ScriptedExecution::Succeed { exit_code, output } => Ok(ExecutionResult {
                 execution_id: request.execution_id,
                 outcome: ExecutionOutcome::Completed { exit_code },
                 effective_isolation: iso,
                 artifacts: vec![],
-                output: None,
+                output,
                 change_set: Some(request.change_set_id),
                 finished_at: Timestamp(0),
             }),
-            ScriptedExecution::TimeOut => Ok(ExecutionResult {
+            ScriptedExecution::TimeOut { output } => Ok(ExecutionResult {
                 execution_id: request.execution_id,
                 outcome: ExecutionOutcome::TimedOut,
                 effective_isolation: iso,
                 artifacts: vec![],
-                output: None,
+                output,
                 change_set: None,
                 finished_at: Timestamp(0),
             }),

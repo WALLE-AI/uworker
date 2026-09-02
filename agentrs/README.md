@@ -152,6 +152,128 @@ cargo run -p agentrs-dev-tui -- --workspace . "Inspect this workspace"
 SGR。不能画宽字形的终端整套换 ASCII 替身（`> + x ! *`），两套字形都是一格宽，
 所以行预算不受影响。每一处降级都进一条通知，不是静默的。
 
+### 工具
+
+八个工具（配了搜索端点则九个）住在 `crates/agentrs-tools/src/builtin/`，一文件一个：
+**声明、编排、措辞在一起**。schema 说 `offset` 是整数、执行侧却按字符串读，
+只有真跑一次才会暴露——它们分家过，代价就是这个。两个宿主（TUI 与 CLI）用同一份，
+授权清单与审批清单也由它派生。
+
+**内核仍然无执行权。** 工具经三个注入的端口拿到 OS：`WorkspaceIo`（读写工作区）、
+`Shell`（跑命令）、`Http`（取网页），实现全在 `agentrs-dev-adapter`。
+判据是**判定留在工具侧，机制注入**：比如 SSRF 里"哪些地址不许去"是策略，
+在 `builtin/net_guard.rs`；"这个域名解析成什么"是机制，走 `Http::resolve`。
+反过来放的话，一个换了 adapter 的宿主就能悄悄换掉安全判定。cwd 围栏是唯一的例外，
+它属宿主义务（L0 的一条），由 `WorkspaceIo` 的实现方负责。
+
+这么分的直接收益：`cargo test -p agentrs-tools` 的 132 条工具语义测试跑在内存
+fake 上，**一次磁盘也不碰**；`agentrs-dev-adapter` 的测试则只管它自己那部分——
+真实文件系统、grant 台账、overlay 一致性。
+
+| 工具 | 画像 | 要点 |
+|---|---|---|
+| `Glob` | 只读·可并发 | `**/*.md` 式通配。`*` 不跨 `/`，`**` 跨且可匹配零层 |
+| `Grep` | 只读·可并发 | 字面子串，可限 `path` / `glob` / `ignore_case` / `max_results` |
+| `Read` | 只读·可并发 | `offset`/`limit` 按行翻页；整份读回逐字节一致（含结尾换行） |
+| `Write` | 会改·独占 | 区分新建与覆盖，覆盖时报出会盖掉多少字节 |
+| `Edit` | 会改·独占 | **`old` 必须唯一**；多处命中会拒绝并说清怎么办，`replace_all` 显式全改 |
+| `Delete` | 会改·独占 | 文件不存在报失败，不再无条件立墓碑 |
+| `WebFetch` | 只读·可并发 | 取公网网页抽成文本。**只读却要审批**，见下 |
+| `Bash` | 会改·独占 | L0 六条围栏内跑 shell；六条缺一即 `IsolationUnavailable` |
+| `WebSearch` | 只读·可并发 | 仅当 `AGENTRS_SEARCH_URL`/`_KEY` 都配好时才注册 |
+
+三条贯穿其中的判据：
+
+**输出宁可截断也不撒谎。** `Read` 超限时保留真实的前几行并在末尾说明"还有 N 行未显示，
+用 offset=M 继续读"；从前是把**整份内容**换成一句"输出过大：N 字节"，模型会把那句话
+当成文件内容读下去。`Grep`/`Glob` 超上限时同样报出总数。
+
+**错误消息要能指导改正。** 判据不是"返回了什么码"，而是模型读完能不能自己改对。
+`Edit` 撞多处时说的是"命中 2 处，请补足上下文让它唯一，或显式传 replace_all"，
+而不是一句"失败"。工具说的话会被原样带到模型面前——内核从前只写 `exit_code=1`，
+把唯一有用的那半句扔了。
+
+**命令输出先清洗再进上下文。** 工具输出是上下文里最容易失控的一段——它的长度由
+外部程序决定，不由模型也不由我们决定。`agentrs-context::compact` 自 aionrs 的
+`aion-compact` 移植（Apache-2.0，见 THIRD-PARTY-NOTICES），`Bash` 的输出走
+**无损**那一级：去 ANSI、把被回车反复重画的进度行折成最后一帧。实测一次带进度条的
+构建输出 1929 → 712 字节，内容一个字节没少。
+
+`Full` 那一级会折叠相似行、重排 JSON——**会改变内容，所以绝不用在 `Read` 上**：
+`Read` 承诺整份读回逐字节一致，基于折叠过的内容做 Edit 会把文件改成谁也没要求的
+样子，而且全程没有任何一步报错。这条判据在 `compact/mod.rs` 里有一条专门的测试钉着。
+
+**声明有 lint，参数有校验。** `agentrs-tools::lint` 审描述与 schema
+（描述太短、缺 `additionalProperties:false`、字段没有 description、`required` 指向
+不存在的字段……），目录旁边有一条测试强制它过；固定管线的第一道关口按 schema 校验参数，
+不合法的调用**跨不出副作用边界**，模型收到的是"path: 必填字段缺失"这样的结构化错误。
+校验器只实现子集，**不认识的关键字一律放行**——看不懂就拒会把第三方（含 MCP）注册的
+工具整个挡在门外。
+
+**要不要人点头，看的是"后果收不收得回来"，不是"改不改工作区"。** 这两件事看起来
+是一回事，加进网络工具之后就不是了：`WebFetch` 一个字节也不碰工作区，却把一个由
+模型选定的地址发了出去，请求发出去就收不回来。所以审批清单是
+`builtin::approval_required` 显式列出的，不是从 `EffectProfile` 派生的——后者另有
+职责（Plan 模式该不该放行），一物二用会在只读探索时顺带禁掉查资料。这与
+`EffectProfile` / `concurrency_safe` "看起来相关、实际互不蕴含"是同构的第三例。
+
+#### 命令与网络
+
+内核仍然**没有**执行权：`clippy.toml` 从类型层面禁掉 `std::process::Command`，
+`scripts/check-no-env.sh` 兜住它覆盖不到的写法，两道门禁只对
+`agentrs-dev-adapter` 开口——那正是 `SandboxExecutor` 这个 port 存在的理由。
+真实隔离（landlock/seccomp/seatbelt）归 SandboxRS，接入门在
+`docs/external-integration-gates.md`。
+
+`Bash` 兑现契约里 L0 的**全部六条**（`contracts/src/sandbox.rs`）：
+
+| 条 | 手段 |
+|---|---|
+| 进程组 | `process_group(0)`，超时时 `kill -- -PGID` 杀掉整组，孙子进程跑不掉 |
+| rlimit | `sh -c 'ulimit -t … -f …; exec …'`——shell 内建，不碰 libc |
+| cwd 限制 | `current_dir(workspace)` |
+| env 清洗 | `env_clear()` + 固定五个变量，值也写死不继承 |
+| 默认断网 | `unshare -rn`（无特权用户命名空间） |
+| 超时强杀 | tokio 超时 → TERM，宽限后 KILL |
+
+六条**首次用到时真跑一次探测**，缺任何一条一律回
+`RejectReason::IsolationUnavailable` 并说明缺哪几条——于是 macOS、Windows、
+关掉了用户命名空间的机器上 `Bash` 直接不可用。这是 H2 要的行为：静默降级等于
+对外宣称"已隔离"却没有。不用 `pre_exec` 是因为它是 `unsafe`，而 workspace
+`unsafe_code = "forbid"`。
+
+命令的副作用**直接落盘**，没有 ChangeSet 兜着。所以 `reconcile` 多一态：派生之前
+先记 `Started`，恢复时只见 `Started` 未见结果 → `ExecutionStatus::Unknown`
+（停下问人），**不得**报 `NotStarted`——那会把一条可能已经生效的命令重跑一遍。
+
+`CommandShapeGuard` 拦几种一眼可辨的形状（`sudo`、`curl … | sh`、越界的
+`rm -rf`、越界重定向、`&` 收尾），拿不准一律 `Abstain`。**它不是安全边界**——
+安全边界是上面六条加人工审批；它的作用是省得人对审批面板麻木，点到第三十条时
+一句看起来平平无奇的 `curl … | sh` 就会被随手放行。它是 `ToolGuard`，因此只能
+`Deny` 或 `Abstain`，没有 `Allow`（内核不变量 15）。
+
+`WebFetch` 的主要风险是 SSRF，不是附带条款：参数由模型填，而它读过的每一篇网页都
+可能在教它去取 `169.254.169.254`（云元数据服务）或 `127.0.0.1:19121`（本机模型
+端点）。因此 scheme 只许 http/https，解析出的 IP 逐个对照内网/本机/链路本地/
+v4 映射的全表，**并把连接钉在已核验的那个地址上**（防 DNS rebinding），
+**每一跳重定向都重判**——首跳公网、302 到 127.0.0.1 是最容易漏的一种。
+与 `agentrs-provider` 相反，它**尊重**环境里的代理设置：provider 连的是本机端点，
+它取的是外网。
+
+判定分两层，因为第二层不是到处都有：
+
+- **不依赖 DNS 的那层**——协议白名单、URL 里写死的字面 IP、以及一张内部主机名表
+  （`localhost`、`*.internal`、`*.local`、`metadata.google.internal`……）。
+  最后那个名字要紧：它和 `169.254.169.254` 是同一个东西，只拦 IP 会整个漏掉它。
+- **依赖 DNS 的那层**——解析出的每一个地址都对照内网/本机/链路本地/v4 映射的全表，
+  并把连接钉在核过的那个地址上。
+
+**走 HTTP 代理时只剩第一层，这一点不该被含糊过去。** 解析是代理做的，客户端既钉不住
+也看不见结果，机器上甚至可能根本没有直连 DNS。此时一个解析到内网的公网域名，我们在
+客户端拦不住它——越界的目标会是**代理所在网络**而不是本机网络，但那仍是一次真实的
+弱化。反过来，代理环境下"解析不出来"是常态而非异常，所以那种情形不再一律拒绝，
+否则整个工具在这类机器上一条也取不到（这正是它最初的表现）。
+
 ### 边界
 
 `crates/agentrs-dev-tui/src/host_io.rs` 是本 crate **唯一**触碰 OS 的文件——时钟、

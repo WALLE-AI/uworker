@@ -95,6 +95,9 @@ pub fn fork(
     };
     // **不继承任何 live 状态**：checkpoint 里可能挂着未决审批，必须清掉。
     new_spec.checkpoint = None;
+    // ChangeSet 也不由分叉决定：它归宿主，宿主要么沿用（多轮对话里同一个会话）、
+    // 要么开新的（另起一段工作）。分叉替它做主，两种都会做错一种。
+    new_spec.change_set_id = None;
 
     Ok(Forked {
         spec: new_spec,
@@ -168,6 +171,8 @@ mod tests {
                 compaction_threshold_pct: 80,
             },
             execution_budget: ExecutionBudget::default(),
+            // 源 Run 写着某个 ChangeSet；分叉不该替宿主决定新 Run 用哪个。
+            change_set_id: Some("cs-src".into()),
             checkpoint: Some(RunCheckpoint {
                 spec_version: SpecVersion(1),
                 up_to_seq: EventSequence(3),
@@ -238,6 +243,17 @@ mod tests {
             boundary: boundary.map(EventSequence),
             new_run_id: "r-fork".into(),
         }
+    }
+
+    #[test]
+    fn 分叉不替宿主决定新_run_写哪个_change_set() {
+        // 沿用（同一段会话的下一轮）还是另开（另起一段工作），只有宿主知道。
+        // 分叉替它做主，两种都会做错一种。
+        let src = 源规格();
+        assert!(src.change_set_id.is_some(), "源 Run 本来写着一个");
+        let events = vec![事件(1, EventPayload::RunStarted, true)];
+        let f = fork(&规格(None), &events, &src, None, 信封(&["Read"])).unwrap();
+        assert_eq!(f.spec.change_set_id, None);
     }
 
     #[test]

@@ -36,7 +36,7 @@ use agentrs_contracts::spec::{
     ContextBudget, ConversationSnapshot, ExecutionBudget, ModelPolicy, RunSpec, SystemContext,
 };
 use agentrs_contracts::version::SpecVersion;
-use agentrs_dev_adapter::{DevPolicy, JsonlPersistence, LocalFileSandbox, NON_PRODUCTION_BANNER};
+use agentrs_dev_adapter::{DevPolicy, JsonlPersistence, LocalDevSandbox, NON_PRODUCTION_BANNER};
 use agentrs_provider::routing::{Route, RoutingProvider};
 use agentrs_provider::transport::OpenAiCompatProvider;
 use agentrs_provider::ProviderPort;
@@ -84,7 +84,7 @@ async fn conformance(workspace: &str) -> Result<(), Box<dyn std::error::Error>> 
     use agentrs_contracts::sandbox::{ExecutionRequest, IsolationLevel};
     use agentrs_testkit::conformance::{check_sandbox, SandboxSubject};
 
-    struct Subject(Arc<LocalFileSandbox>);
+    struct Subject(Arc<LocalDevSandbox>);
 
     impl SandboxSubject for Subject {
         fn executor(&self) -> Arc<dyn SandboxExecutor> {
@@ -143,7 +143,7 @@ async fn conformance(workspace: &str) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    let sb = Arc::new(LocalFileSandbox::new(workspace)?);
+    let sb = Arc::new(LocalDevSandbox::new(workspace)?);
     println!("受检对象：agentrs-dev-adapter（L0BasicContainment）");
     println!("工作区根：{}\n", sb.root().display());
 
@@ -200,7 +200,7 @@ async fn conformance(workspace: &str) -> Result<(), Box<dyn std::error::Error>> 
             }
         }
 
-        let sb2 = Arc::new(LocalFileSandbox::new(workspace)?);
+        let sb2 = Arc::new(LocalDevSandbox::new(workspace)?);
         let pol = Arc::new(DevPolicy::new(sb2, ["Write"]));
         println!();
         let r = check_policy(&Pol(pol)).await;
@@ -314,26 +314,31 @@ async fn execute_run(
     )?);
 
     // 内核无提交权：ChangeSet 的提交是**宿主的显式动作**。
-    let mut committer: Option<Arc<LocalFileSandbox>> = None;
+    let mut committer: Option<Arc<LocalDevSandbox>> = None;
 
     // ---- 装配工具执行 adapter ----
     let tools: Option<Arc<ToolRoundDeps>> = if use_dev {
         eprintln!("{NON_PRODUCTION_BANNER}");
 
-        let sandbox = Arc::new(LocalFileSandbox::new(&workspace)?);
+        let sandbox = Arc::new(LocalDevSandbox::new(&workspace)?);
         eprintln!("工作区根：{}", sandbox.root().display());
         committer = Some(sandbox.clone());
 
-        // allowlist 是白名单——不在名单内一律拒绝。
+        // allowlist 是白名单——不在名单内一律拒绝。名字取自目录本身而不是手抄：
+        // 抄漏一个（这里从前就漏了 Glob），那个工具永远调不动，而模型只会看到
+        // 一次次 OutOfAuthority，然后换着法子绕。
         let policy = Arc::new(DevPolicy::new(
             sandbox.clone(),
-            ["Read", "Grep", "Write", "Edit", "Delete"],
+            agentrs_dev_adapter::env_tool_names(),
         ));
 
-        let t = Arc::new(ToolRoundDeps::minimal(
-            policy as Arc<dyn PolicyEnforcer>,
-            sandbox as Arc<dyn SandboxExecutor>,
-        ));
+        let t = Arc::new(
+            ToolRoundDeps::minimal(
+                policy as Arc<dyn PolicyEnforcer>,
+                sandbox as Arc<dyn SandboxExecutor>,
+            )
+            .with_guard(Arc::new(agentrs_dev_adapter::CommandShapeGuard)),
+        );
         Some(t)
     } else {
         None
@@ -389,62 +394,12 @@ async fn execute_run(
     };
 
     // 工具目录由宿主提供——内核不持有实现，也不自行发现工具。
+    //
+    // 与执行侧同一处来源（`agentrs_dev_adapter::catalog`）：schema 说 offset 是整数、
+    // 执行侧却按字符串读，模型永远得不到它想要的结果，而这种漂移只会在真跑一次之后
+    // 才暴露。两个宿主各抄一份的时候，改一处忘一处是迟早的事。
     let tools = if use_dev {
-        vec![
-            agentrs_types::ToolDef::read_only(
-                "Read",
-                "读取工作区内的一个文本文件。path 为相对工作区根的路径。",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string", "description": "相对路径"}},
-                    "required": ["path"]
-                }),
-            ),
-            agentrs_types::ToolDef::read_only(
-                "Grep",
-                "在工作区内按子串搜索。返回 路径:行号:内容。会看到未提交的改动。",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {"pattern": {"type": "string", "description": "要搜索的子串"}},
-                    "required": ["pattern"]
-                }),
-            ),
-            agentrs_types::ToolDef::mutating(
-                "Write",
-                "把内容写入工作区内的一个文件（进入未提交的 ChangeSet）。",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对路径"},
-                        "content": {"type": "string", "description": "文件内容"}
-                    },
-                    "required": ["path", "content"]
-                }),
-            ),
-            agentrs_types::ToolDef::mutating(
-                "Edit",
-                "把文件中的 old 全部替换为 new（进入未提交的 ChangeSet）。\
-                 后续 Read/Grep 立即能看到替换结果。",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对路径"},
-                        "old": {"type": "string", "description": "待替换的原文本"},
-                        "new": {"type": "string", "description": "替换后的文本"}
-                    },
-                    "required": ["path", "old", "new"]
-                }),
-            ),
-            agentrs_types::ToolDef::mutating(
-                "Delete",
-                "删除工作区内的一个文件（进入未提交的 ChangeSet，提交前不动磁盘）。",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string", "description": "相对路径"}},
-                    "required": ["path"]
-                }),
-            ),
-        ]
+        agentrs_dev_adapter::env_tool_catalog()
     } else {
         Vec::new()
     };
@@ -524,31 +479,23 @@ fn spec(run_id: &str, model: &str, fallback_model: Option<&str>, max_retries: u8
         parent_run_id: None,
         conversation: ConversationSnapshot::default(),
         system_context: SystemContext {
-            sections: vec!["你是一个简洁的助手。需要读写文件时使用 Read / Write 工具。".to_string()],
+            sections: vec![
+                "你是一个简洁的助手。需要了解工作区时先用 Glob 或 Grep 找文件，再用 Read 读；\
+                 需要改动时用 Write 或 Edit。"
+                    .to_string(),
+            ],
             workspace_id: Some("default".to_string()),
         },
         authority: AuthorityEnvelope {
             id: "cli".into(),
             workspaces: vec!["default".into()],
-            tools: vec![
-                "Read".into(),
-                "Grep".into(),
-                "Write".into(),
-                "Edit".into(),
-                "Delete".into(),
-            ],
+            tools: agentrs_dev_adapter::env_tool_names(),
             providers: providers.clone(),
             models: models.clone(),
             max_depth: 1,
         },
         initial_capabilities: CapabilityView {
-            tools: vec![
-                "Read".into(),
-                "Grep".into(),
-                "Write".into(),
-                "Edit".into(),
-                "Delete".into(),
-            ],
+            tools: agentrs_dev_adapter::env_tool_names(),
             providers: providers.clone(),
             models: models.clone(),
         },
@@ -568,6 +515,7 @@ fn spec(run_id: &str, model: &str, fallback_model: Option<&str>, max_retries: u8
             compaction_threshold_pct: 80,
         },
         execution_budget: ExecutionBudget::default(),
+        change_set_id: None,
         checkpoint: None,
         spec_version: SpecVersion(1),
         config: Default::default(),

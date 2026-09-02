@@ -1,6 +1,6 @@
 //! 把 conformance suite 跑在 dev-adapter 的真实实现上。
 //!
-//! `LocalFileSandbox` 是**我们自己写的参考实现**——正因如此才更要跑：
+//! `LocalDevSandbox` 是**我们自己写的参考实现**——正因如此才更要跑：
 //! 自家实现最容易被默认"当然是对的"，而宿主义务恰恰是内核无法自证的那一半。
 
 use std::sync::Arc;
@@ -9,11 +9,11 @@ use agentrs_contracts::ids::{ExecutionId, Timestamp};
 use agentrs_contracts::policy::InputHash;
 use agentrs_contracts::ports::SandboxExecutor;
 use agentrs_contracts::sandbox::{ExecutionRequest, IsolationLevel};
-use agentrs_dev_adapter::LocalFileSandbox;
+use agentrs_dev_adapter::LocalDevSandbox;
 use agentrs_testkit::conformance::{check_sandbox, SandboxSubject};
 
 struct 受检的DevAdapter {
-    sb: Arc<LocalFileSandbox>,
+    sb: Arc<LocalDevSandbox>,
     _dir: tempdir::TempDir,
 }
 
@@ -87,7 +87,7 @@ impl SandboxSubject for 受检的DevAdapter {
 #[tokio::test]
 async fn dev_adapter_满足全部宿主义务() {
     let dir = tempdir::TempDir::new("agentrs-conf").unwrap();
-    let sb = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+    let sb = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
     let subject = 受检的DevAdapter { sb, _dir: dir };
 
     let report = check_sandbox(&subject).await;
@@ -146,7 +146,7 @@ mod h5 {
     use agentrs_contracts::ids::{Digest, Timestamp};
     use agentrs_contracts::policy::{InputHash, ToolProposal};
     use agentrs_contracts::ports::PolicyEnforcer;
-    use agentrs_dev_adapter::{DevPolicy, LocalFileSandbox};
+    use agentrs_dev_adapter::{DevPolicy, LocalDevSandbox};
     use agentrs_testkit::conformance::policy::{check_policy, PolicySubject};
 
     struct 受检的DevPolicy {
@@ -179,7 +179,7 @@ mod h5 {
     #[tokio::test]
     async fn dev_policy_满足_h5() {
         let dir = tempdir::TempDir::new("agentrs-conf-h5").unwrap();
-        let sb = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let sb = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
         let p = Arc::new(DevPolicy::new(sb, ["Write"]));
         let subject = 受检的DevPolicy { p, _dir: dir };
 
@@ -197,7 +197,7 @@ mod interactive_h5 {
     use agentrs_contracts::ids::{Digest, Timestamp};
     use agentrs_contracts::policy::{InputHash, ToolProposal};
     use agentrs_contracts::ports::PolicyEnforcer;
-    use agentrs_dev_adapter::{ApprovalAnswer, InteractiveDevPolicy, LocalFileSandbox};
+    use agentrs_dev_adapter::{ApprovalAnswer, InteractiveDevPolicy, LocalDevSandbox};
     use agentrs_testkit::conformance::policy::{check_policy, PolicySubject};
     use tokio::sync::mpsc;
 
@@ -239,7 +239,7 @@ mod interactive_h5 {
     #[tokio::test]
     async fn interactive_policy_满足_h5() {
         let dir = tempdir::TempDir::new("agentrs-interactive-h5").unwrap();
-        let sandbox = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let sandbox = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
         let (requests, mut receiver) = mpsc::channel(32);
         let policy = Arc::new(
             InteractiveDevPolicy::new(
@@ -274,7 +274,7 @@ mod interactive_h5 {
 /// 有效期必须与逻辑时刻比较，而不是"是不是 ≤ 0"。
 ///
 /// 这条是 conformance suite 逼出来的连锁修正：`DevPolicy` 改为签发有限期
-/// grant 之后，`LocalFileSandbox` 原来那句 `expires_at <= 0` 就露馅了——
+/// grant 之后，`LocalDevSandbox` 原来那句 `expires_at <= 0` 就露馅了——
 /// 一个"5 分钟后到期"的 grant 在第 10 分钟仍会被放行。
 mod 有效期 {
     use std::sync::Arc;
@@ -283,12 +283,12 @@ mod 有效期 {
     use agentrs_contracts::policy::{InputHash, SandboxGrant};
     use agentrs_contracts::ports::SandboxExecutor;
     use agentrs_contracts::sandbox::{ExecutionOutcome, ExecutionRequest, IsolationLevel, RejectReason};
-    use agentrs_dev_adapter::LocalFileSandbox;
+    use agentrs_dev_adapter::LocalDevSandbox;
 
     #[tokio::test]
     async fn 逻辑时刻走过到期点后_grant_失效() {
         let dir = tempdir::TempDir::new("agentrs-ttl").unwrap();
-        let sb = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let sb = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
         let hash = InputHash(Digest::from_hex("h"));
 
         // 一个在 t=100 到期的 grant。

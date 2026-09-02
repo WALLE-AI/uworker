@@ -1,8 +1,12 @@
-//! 受限文件执行器（L0 基础围栏）。
+//! 受限本地执行器（L0 基础围栏）。
 //!
 //! **这是开发工具，不是产品运行时。**真实隔离归 SandboxRS；本实现只提供
 //! `IsolationLevel::L0BasicContainment`——它挡得住"写到工作区之外"这类最常见的越界，
 //! 挡不住有意的提权攻击。
+//!
+//! 三类工具在这里落地：文件（本模块）、命令（[`crate::exec`]）、
+//! 网络（[`crate::web`]）。后两类各自的围栏与判定写在自己的模块里，
+//! 本模块只负责派活，以及三类共用的那套 grant 复核。
 //!
 //! 即便如此，它仍然**严格履行宿主义务**：
 //!
@@ -29,6 +33,13 @@ use async_trait::async_trait;
 /// 一次执行的记录，供 `reconcile` 如实回答。
 #[derive(Debug, Clone)]
 enum Record {
+    /// 命令**已经派生出去了**，但还没等到结果。
+    ///
+    /// 这一态不能省。文件工具用不着它——overlay 的写入是原子的，要么记上了要么
+    /// 没有。命令不是：进程一旦跑起来就可能已经改了盘，而宿主在这中间崩掉的话，
+    /// 恢复时唯一诚实的回答是 [`ExecutionStatus::Unknown`]（停下问人），
+    /// 而不是 `NotStarted`——那会让内核把一条可能已经生效的命令再跑一遍。
+    Started,
     Finished(Box<ExecutionResult>),
 }
 
@@ -69,20 +80,53 @@ enum Overlay {
     Tombstone,
 }
 
-/// 本地受限文件执行器。
-pub struct LocalFileSandbox {
+/// 本地受限执行器。
+///
+/// 从前叫 `LocalFileSandbox`。加进命令与网络之后那个名字就在骗人了——
+/// 一个叫 "File" 的类型跑任意 shell 命令、取任意 URL，是这个项目最不能忍的
+/// 那种误导。改名比留一个会让人读错的名字便宜。
+pub struct LocalDevSandbox {
     root: PathBuf,
     state: Mutex<State>,
+    /// 命令执行端口。工具侧只看得到它，看不到 `unshare` 与 `ulimit`。
+    shell: crate::exec::LocalShell,
+    /// 出站 HTTP 端口。
+    http: crate::web::ReqwestHttp,
+    /// 搜索端点；没配就没有 `WebSearch`。
+    search: Option<agentrs_tools::builtin::SearchEndpoint>,
 }
 
-impl LocalFileSandbox {
+impl LocalDevSandbox {
     /// 以 `root` 为工作区根创建。**所有路径都会被限制在此目录内。**
+    ///
+    /// 搜索端点从环境读（`AGENTRS_SEARCH_URL`/`_KEY`）；没配就没有 `WebSearch`。
     pub fn new(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        Self::with_search(root, crate::web::search_endpoint_from_env())
+    }
+
+    /// 显式给定搜索端点配置。测试与不读环境的宿主走这条。
+    pub fn with_search(
+        root: impl AsRef<Path>,
+        search: Option<agentrs_tools::builtin::SearchEndpoint>,
+    ) -> std::io::Result<Self> {
         let root = root.as_ref().canonicalize()?;
         Ok(Self {
+            shell: crate::exec::LocalShell::new(&root),
             root,
             state: Mutex::new(State::default()),
+            http: crate::web::ReqwestHttp,
+            search,
         })
+    }
+
+    /// 本执行器实际提供了哪些能力。宿主据此推目录——
+    /// 声明了却跑不动的工具于是在构造上不可能存在。
+    pub fn capabilities(&self) -> agentrs_tools::builtin::Capabilities {
+        agentrs_tools::builtin::Capabilities {
+            shell: true,
+            http: true,
+            search: self.search.is_some(),
+        }
     }
 
     /// 工作区根。
@@ -171,6 +215,24 @@ impl LocalFileSandbox {
             .unwrap()
             .overlay
             .insert((change_set.to_string(), path.to_path_buf()), Overlay::Tombstone);
+    }
+
+    /// 本 ChangeSet 视角下的全部文件，工作区相对路径，已排序。
+    ///
+    /// `Glob` 与 `Grep` 都走它，所以两者对"有哪些文件"的看法不会分叉。
+    fn relative_files(&self, change_set: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .visible_files(change_set)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&self.root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// 列出本 ChangeSet 视角下工作区里的全部文件。
@@ -290,6 +352,15 @@ impl LocalFileSandbox {
         before - state.overlay.len()
     }
 
+    /// 记下"这条执行已经派生出去了"。
+    fn mark_started(&self, id: &ExecutionId) {
+        self.state
+            .lock()
+            .unwrap()
+            .history
+            .insert(id.clone(), Record::Started);
+    }
+
     fn reject(id: ExecutionId, reason: RejectReason) -> ExecutionResult {
         ExecutionResult {
             execution_id: id,
@@ -327,8 +398,61 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 #[derive(Debug, Clone)]
 pub struct TextOutput(pub String);
 
+/// 一次执行看到的工作区：某个 ChangeSet 的视角。
+///
+/// [`agentrs_tools::builtin::WorkspaceIo`] 的方法只收一个相对路径，不带
+/// ChangeSet——那是**故意的**：工具不该知道 ChangeSet 存在，它只要求"读己之写"
+/// 成立。哪个 ChangeSet、overlay 怎么叠、墓碑怎么算，全是宿主义务（H7），
+/// 由这一层兜住。
+struct ChangeSetView<'a> {
+    sandbox: &'a LocalDevSandbox,
+    change_set: String,
+}
+
+impl ChangeSetView<'_> {
+    /// 解析路径并施加 cwd 围栏（L0 的一条，H2）。
+    fn 定位(&self, rel: &str) -> Result<PathBuf, agentrs_tools::builtin::IoError> {
+        self.sandbox
+            .resolve(rel)
+            .ok_or(agentrs_tools::builtin::IoError::OutsideWorkspace)
+    }
+}
+
 #[async_trait]
-impl SandboxExecutor for LocalFileSandbox {
+impl agentrs_tools::builtin::WorkspaceIo for ChangeSetView<'_> {
+    async fn read(&self, path: &str) -> Result<String, agentrs_tools::builtin::IoError> {
+        use agentrs_tools::builtin::IoError;
+        let p = self.定位(path)?;
+        self.sandbox.read(&self.change_set, &p).map_err(|e| {
+            // 墓碑与"盘上没有"都归 NotFound：删除必须表现得和文件不存在
+            // 完全一样，否则删除只是看起来生效了。
+            match e.kind() {
+                std::io::ErrorKind::NotFound => IoError::NotFound,
+                other => IoError::Other(other.to_string()),
+            }
+        })
+    }
+
+    async fn write(&self, path: &str, content: String) -> Result<(), agentrs_tools::builtin::IoError> {
+        let p = self.定位(path)?;
+        self.sandbox.write(&self.change_set, &p, content);
+        Ok(())
+    }
+
+    async fn delete(&self, path: &str) -> Result<(), agentrs_tools::builtin::IoError> {
+        let p = self.定位(path)?;
+        self.sandbox.delete(&self.change_set, &p);
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<String>, agentrs_tools::builtin::IoError> {
+        // 已排序——契约要求的，Glob 与 Grep 都靠它保持输出稳定。
+        Ok(self.sandbox.relative_files(&self.change_set))
+    }
+}
+
+#[async_trait]
+impl SandboxExecutor for LocalDevSandbox {
     async fn execute(
         &self,
         grant: SandboxGrant,
@@ -370,145 +494,29 @@ impl SandboxExecutor for LocalFileSandbox {
             ));
         }
 
-        let cs = request.change_set_id.as_str().to_string();
-        let arg = |k: &str| -> Option<String> {
-            request
-                .arguments
-                .get(k)
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
+        // ---- 派活 ----
+        // 工具的声明、编排与措辞全在 `agentrs_tools::builtin`；本模块只提供它
+        // 注入的三个端口，也就是真正碰 OS 的那部分。从前这里是一个三百行的
+        // match，声明在 catalog.rs、判定在 exec_guard.rs——想知道"Read 到底做
+        // 什么"得读三个文件。
+        let view = ChangeSetView {
+            sandbox: self,
+            change_set: request.change_set_id.as_str().to_string(),
         };
-
-        /// 内联输出的大小上限；超过必须 ref 化。
-        const MAX_INLINE: usize = 16 * 1024;
-
-        let (outcome, output) = match request.tool_name.as_str() {
-            "Read" => match arg("path").and_then(|p| self.resolve(&p)) {
-                None => (
-                    // 路径逃逸——L0 围栏的主要拦截点。
-                    ExecutionOutcome::Rejected {
-                        reason: RejectReason::ChangeSetUnavailable,
-                    },
-                    None,
-                ),
-                Some(path) => match self.read(&cs, &path) {
-                    Ok(text) if text.len() <= MAX_INLINE => {
-                        (ExecutionOutcome::Completed { exit_code: 0 }, Some(text))
-                    }
-                    Ok(text) => (
-                        ExecutionOutcome::Completed { exit_code: 0 },
-                        Some(format!(
-                            "[输出过大：{} 字节，超过内联上限；真实实现应走 ContentStore 引用]",
-                            text.len()
-                        )),
-                    ),
-                    Err(e) => (
-                        ExecutionOutcome::Completed { exit_code: 1 },
-                        Some(format!("读取失败：{}", e.kind())),
-                    ),
-                },
-            },
-            "Write" => match (arg("path").and_then(|p| self.resolve(&p)), arg("content")) {
-                (Some(path), Some(content)) => {
-                    let n = content.len();
-                    self.write(&cs, &path, content);
-                    (
-                        ExecutionOutcome::Completed { exit_code: 0 },
-                        Some(format!("已写入 {n} 字节（未提交，位于 ChangeSet 内）")),
-                    )
-                }
-                _ => (
-                    ExecutionOutcome::Rejected {
-                        reason: RejectReason::ChangeSetUnavailable,
-                    },
-                    None,
-                ),
-            },
-            // **Edit 是读己之写最要紧的那条路径**：它先读、再改、再写，
-            // 中间那次读必须看到 overlay，否则连续两次 Edit 的第二次
-            // 会基于盘上的旧内容，把第一次的改动悄悄抹掉。
-            "Edit" => match (arg("path").and_then(|p| self.resolve(&p)), arg("old"), arg("new")) {
-                (Some(path), Some(old), Some(new)) => match self.read(&cs, &path) {
-                    Err(e) => (
-                        ExecutionOutcome::Completed { exit_code: 1 },
-                        Some(format!("读取失败：{}", e.kind())),
-                    ),
-                    Ok(text) if !text.contains(&old) => (
-                        ExecutionOutcome::Completed { exit_code: 1 },
-                        // 不透传 old/new 正文——可能含用户内容。
-                        Some("未找到待替换的文本".to_string()),
-                    ),
-                    Ok(text) => {
-                        let n = text.matches(&old).count();
-                        self.write(&cs, &path, text.replace(&old, &new));
-                        (
-                            ExecutionOutcome::Completed { exit_code: 0 },
-                            Some(format!("已替换 {n} 处（未提交，位于 ChangeSet 内）")),
-                        )
-                    }
-                },
-                _ => (
-                    ExecutionOutcome::Rejected {
-                        reason: RejectReason::ChangeSetUnavailable,
-                    },
-                    None,
-                ),
-            },
-            "Delete" => match arg("path").and_then(|p| self.resolve(&p)) {
-                Some(path) => {
-                    self.delete(&cs, &path);
-                    (
-                        ExecutionOutcome::Completed { exit_code: 0 },
-                        Some("已删除（未提交，位于 ChangeSet 内）".to_string()),
-                    )
-                }
-                None => (
-                    ExecutionOutcome::Rejected {
-                        reason: RejectReason::ChangeSetUnavailable,
-                    },
-                    None,
-                ),
-            },
-            // Grep 同样走 overlay：只搜磁盘的话，刚写的文件搜不到、
-            // 刚删的文件仍能搜到——模型据此做的判断全是错的。
-            "Grep" => match arg("pattern") {
-                None => (
-                    ExecutionOutcome::Rejected {
-                        reason: RejectReason::ChangeSetUnavailable,
-                    },
-                    None,
-                ),
-                Some(pattern) => {
-                    let mut hits = Vec::new();
-                    for path in self.visible_files(&cs) {
-                        let Ok(text) = self.read(&cs, &path) else {
-                            continue;
-                        };
-                        for (i, line) in text.lines().enumerate() {
-                            if line.contains(&pattern) {
-                                let rel = path
-                                    .strip_prefix(&self.root)
-                                    .unwrap_or(&path)
-                                    .display()
-                                    .to_string();
-                                hits.push(format!("{rel}:{}:{line}", i + 1));
-                            }
-                        }
-                    }
-                    let text = if hits.is_empty() {
-                        "无匹配".to_string()
-                    } else {
-                        hits.join("\n")
-                    };
-                    (ExecutionOutcome::Completed { exit_code: 0 }, Some(text))
-                }
-            },
-            other => (
-                ExecutionOutcome::Completed { exit_code: 127 },
-                Some(format!("未知工具：{other}")),
-            ),
+        let cx = agentrs_tools::builtin::ToolCtx {
+            files: &view,
+            shell: Some(&self.shell),
+            http: Some(&self.http),
+            search: self.search.as_ref(),
         };
-
+        // 命令可能已经改了盘，所以派生**之前**先记一笔：宿主在这中间崩掉时，
+        // reconcile 才答得出 Unknown 而不是 NotStarted（后者会让内核重跑）。
+        // 文件工具不需要这个——overlay 的写入是原子的。
+        if request.tool_name == "Bash" {
+            self.mark_started(&request.execution_id);
+        }
+        let out = agentrs_tools::builtin::execute(&request.tool_name, &request.arguments, &cx).await;
+        let (outcome, output) = (out.outcome, out.text);
         let result = ExecutionResult {
             execution_id: request.execution_id.clone(),
             outcome,
@@ -534,6 +542,10 @@ impl SandboxExecutor for LocalFileSandbox {
         let s = self.state.lock().unwrap();
         Ok(match s.history.get(&execution_id) {
             Some(Record::Finished(r)) => ExecutionStatus::Finished(r.clone()),
+            // 派生了但没等到结果。进程可能已经改了盘，也可能还没来得及——
+            // 这里唯一诚实的回答就是"不知道"，内核据此停在 RunNeedsUserAction
+            // 而不是重跑（H2）。
+            Some(Record::Started) => ExecutionStatus::Unknown,
             // 从未见过 = 确实没开始。**如实报告**（H2）。
             None => ExecutionStatus::NotStarted,
         })
@@ -541,7 +553,7 @@ impl SandboxExecutor for LocalFileSandbox {
 }
 
 /// 读取工具的便捷入口，供 CLI 直接取内容（绕开 ContentStore ref 化）。
-impl LocalFileSandbox {
+impl LocalDevSandbox {
     /// 读取一个工作区内的文件，遵循 overlay。
     pub fn read_text(&self, change_set: &str, rel: &str) -> Option<String> {
         let p = self.resolve(rel)?;
@@ -559,7 +571,7 @@ mod pending_tests {
         let dir = tempdir::TempDir::new("agentrs-pending").unwrap();
         std::fs::write(dir.path().join("kept.md"), "old\n").unwrap();
         std::fs::write(dir.path().join("gone.md"), "bye\n").unwrap();
-        let sb = LocalFileSandbox::new(dir.path()).unwrap();
+        let sb = LocalDevSandbox::new(dir.path()).unwrap();
 
         assert!(sb.pending_entries("cs").is_empty());
 
@@ -596,10 +608,10 @@ mod tests {
 
     use super::*;
 
-    fn 沙箱() -> (LocalFileSandbox, tempdir::TempDir) {
+    fn 沙箱() -> (LocalDevSandbox, tempdir::TempDir) {
         let dir = tempdir::TempDir::new("agentrs-dev").unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
-        let sb = LocalFileSandbox::new(dir.path()).unwrap();
+        let sb = LocalDevSandbox::new(dir.path()).unwrap();
         (sb, dir)
     }
 
@@ -765,6 +777,24 @@ mod tests {
             sb.reconcile("e1".into()).await.unwrap(),
             ExecutionStatus::Finished(_)
         ));
+    }
+
+    // 围栏缺失时拒绝执行、以及缺失不影响其余工具这两条，随判定一起搬去了
+    // `agentrs_tools::builtin::bash`，在那里用 `FakeShell` 测——不必再靠往私有
+    // 字段里塞一个假探测结果。第二条如今更是结构性成立：只有 Bash 会去看
+    // `ToolCtx::shell`，别的工具连拿都拿不到它。
+
+    #[tokio::test]
+    async fn h2_派生之后没等到结果时_reconcile_答不知道() {
+        // 宿主在命令跑到一半崩掉，就是这个形状。进程可能已经改了盘，
+        // 报 NotStarted 会让内核把它再跑一遍——这正是 reconcile 三态里
+        // Unknown 存在的全部理由。
+        let (sb, _d) = 沙箱();
+        sb.mark_started(&"e-interrupted".into());
+        assert_eq!(
+            sb.reconcile("e-interrupted".into()).await.unwrap(),
+            ExecutionStatus::Unknown
+        );
     }
 
     #[tokio::test]

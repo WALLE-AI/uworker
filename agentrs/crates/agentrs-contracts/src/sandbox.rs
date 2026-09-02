@@ -108,6 +108,12 @@ pub enum RejectReason {
     IsolationUnavailable,
     /// 目标 ChangeSet 不存在或已提交/丢弃。
     ChangeSetUnavailable,
+    /// 目标路径落在工作区之外。
+    ///
+    /// L0 围栏的核心拦截点，单列一个码而不是并进
+    /// [`Self::ChangeSetUnavailable`]：把路径逃逸报成"变更集不可用"，会让排查的人
+    /// 去查变更集，而那里什么问题也没有。conformance 的 H2 也该能区分这两者。
+    OutsideWorkspace,
 }
 
 /// `reconcile` 的返回。**必须如实报告**（宿主义务 H2）——

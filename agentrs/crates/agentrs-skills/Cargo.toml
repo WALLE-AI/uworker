@@ -8,6 +8,15 @@ description = "AgentRS: 技能清单解析、单调收窄合并与缓存落位"
 
 [dependencies]
 agentrs-contracts = { workspace = true }
+agentrs-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 技能内容包的 frontmatter 是 YAML。手写 YAML 解析器不在选项内——它不是
+# glob 那种"形状固定且少"的东西。上游标注 deprecated 只是不再加新特性，
+# 解析本身是对的。
+serde_yaml = "0.9"
+# 技能清单按**显示宽度**排预算：按字符数算的话，一行中文的实际宽度是预算的两倍。
+unicode-width = "0.2"
 
 [lints]
 workspace = true

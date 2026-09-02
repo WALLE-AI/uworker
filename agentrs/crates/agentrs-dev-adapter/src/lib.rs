@@ -19,15 +19,44 @@
 
 #![forbid(unsafe_code)]
 
+pub mod exec;
+pub mod exec_guard;
 pub mod interactive_policy;
 pub mod persistence;
 pub mod policy;
 pub mod sandbox;
+pub mod vcr;
+pub mod web;
 
+pub use exec_guard::CommandShapeGuard;
 pub use interactive_policy::{ApprovalAnswer, ApprovalPrompt, InteractiveDevPolicy};
 pub use persistence::JsonlPersistence;
 pub use policy::DevPolicy;
-pub use sandbox::LocalFileSandbox;
+pub use sandbox::{LocalDevSandbox, PendingChange};
+pub use web::search_endpoint_from_env;
+
+/// 本机环境下可用的能力。宿主用它推目录。
+///
+/// **这一层只做一件事：读环境。** 工具目录本身在
+/// [`agentrs_tools::builtin::catalog`]，因为内核库不许读环境，而"有没有配搜索
+/// 端点"只有宿主知道。
+pub fn env_capabilities() -> agentrs_tools::builtin::Capabilities {
+    agentrs_tools::builtin::Capabilities {
+        shell: true,
+        http: true,
+        search: search_endpoint_from_env().is_some(),
+    }
+}
+
+/// 本机环境下的工具目录。
+pub fn env_tool_catalog() -> Vec<agentrs_types::ToolDef> {
+    agentrs_tools::builtin::catalog(env_capabilities())
+}
+
+/// [`env_tool_catalog`] 的名字表。宿主构造 `RunSpec` 的授权与能力时用它。
+pub fn env_tool_names() -> Vec<String> {
+    agentrs_tools::builtin::tool_names(env_capabilities())
+}
 
 /// 启动时打印的非生产横幅。
 pub const NON_PRODUCTION_BANNER: &str = "\

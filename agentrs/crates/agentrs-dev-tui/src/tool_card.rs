@@ -168,21 +168,30 @@ fn subject(name: &str, input: &serde_json::Value) -> Option<String> {
     let key = match kind_of(name) {
         CardKind::Search => &["pattern", "query", "path"][..],
         CardKind::Terminal => &["command", "cmd"][..],
-        CardKind::Web => &["url"][..],
+        // `query` belongs here beside `url`: a `WebSearch` is a web call but has
+        // no url, and listing only `url` left its header as a bare `WebSearch`
+        // with nothing after it — the one card in the transcript that did not
+        // say what it did.
+        CardKind::Web => &["url", "query"][..],
         _ => &["path", "file", "file_path"][..],
     };
     argument(input, key).map(sanitize_line)
 }
 
 /// The present-tense verb for the working line.
-const fn verb(kind: CardKind) -> &'static str {
-    match kind {
-        CardKind::Read => "Reading",
-        CardKind::Search => "Searching",
-        CardKind::Diff => "Editing",
-        CardKind::Terminal => "Running",
-        CardKind::Web => "Fetching",
-        CardKind::Generic => "Calling",
+///
+/// Keyed on the name, not just the kind: `WebFetch` and `WebSearch` share a
+/// category — both go out to the network, and that is what a reviewer wants to
+/// see — but "Fetching rust async" describes neither of them.
+fn verb(name: &str, kind: CardKind) -> &'static str {
+    match (name, kind) {
+        ("WebSearch" | "Search", _) => "Searching",
+        (_, CardKind::Read) => "Reading",
+        (_, CardKind::Search) => "Searching",
+        (_, CardKind::Diff) => "Editing",
+        (_, CardKind::Terminal) => "Running",
+        (_, CardKind::Web) => "Fetching",
+        (_, CardKind::Generic) => "Calling",
     }
 }
 
@@ -241,7 +250,15 @@ fn body_of(node: &ToolNode, extras: &CardExtras<'_>) -> Vec<DetailLine> {
         rows.extend(message.lines().map(|line| DetailLine::toned(line, tone)));
     }
     if let Some(output) = &node.output {
-        rows.extend(output.lines().map(DetailLine::plain));
+        // 失败时内核把工具说的那句话搬进了 `message`，`output` 里还留着同一句。
+        // 两处都画就是同一句话贴两遍。
+        let 已在消息里 = node
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(output.trim()));
+        if !已在消息里 {
+            rows.extend(output.lines().map(DetailLine::plain));
+        }
     }
     for artifact in &node.artifacts {
         rows.push(DetailLine::toned(
@@ -285,8 +302,8 @@ pub fn build_tool_card(node: &ToolNode, extras: &CardExtras<'_>) -> ToolCard {
         None => name.clone(),
     };
     let activity = match &subject {
-        Some(subject) => format!("{} {subject}", verb(kind)),
-        None => format!("{} {name}", verb(kind)),
+        Some(subject) => format!("{} {subject}", verb(&name, kind)),
+        None => format!("{} {name}", verb(&name, kind)),
     };
     let fold_above_rows = if !node.status.settled() {
         UNSETTLED_ROWS
@@ -347,6 +364,34 @@ mod tests {
     }
 
     #[test]
+    fn every_web_call_says_what_it_reached_for() {
+        // `WebSearch` used to render as a bare `WebSearch` with nothing after
+        // it — the one card in the transcript that did not say what it did,
+        // because the Web kind only looked for `url` and a search has `query`.
+        let search = card(&node(
+            "WebSearch",
+            serde_json::json!({"query": "rust async", "num_results": 2}),
+            ToolStatus::Succeeded,
+        ));
+        assert_eq!(search.title, "WebSearch rust async");
+        // And it is searching, not fetching. The two share a card kind because
+        // both go out to the network, but that is a rendering category, not a verb.
+        assert_eq!(search.activity, "Searching rust async");
+
+        let fetch = card(&node(
+            "WebFetch",
+            serde_json::json!({"url": "https://example.com/", "format": "text"}),
+            ToolStatus::Running,
+        ));
+        assert_eq!(fetch.title, "WebFetch https://example.com/");
+        assert_eq!(fetch.activity, "Fetching https://example.com/");
+        // Both stay in the Web category: a reviewer scanning the transcript
+        // wants "this one left the machine" to be visible at a glance.
+        assert_eq!(search.kind, CardKind::Web);
+        assert_eq!(fetch.kind, CardKind::Web);
+    }
+
+    #[test]
     fn the_header_carries_the_one_argument_worth_reading() {
         let read = card(&node(
             "Read",
@@ -384,6 +429,23 @@ mod tests {
         let built = card(&denied);
         assert_eq!(built.badge.as_deref(), Some("PermissionMode"));
         assert_eq!(built.body[0].tone, Some(RowTone::Error));
+    }
+
+    #[test]
+    fn a_failure_says_its_piece_once() {
+        // 内核把工具说的话搬进了 message，output 里还留着同一句；两处都画就是
+        // 同一句话贴两遍。
+        let mut failed = node("Read", serde_json::json!({"path": "a"}), ToolStatus::Failed);
+        failed.output = Some("读取失败：entity not found".into());
+        failed.message = Some("读取失败：entity not found（exit_code=1）".into());
+        let built = card(&failed);
+        assert_eq!(built.body.len(), 1, "{:?}", built.body);
+        assert!(built.body[0].text.contains("exit_code=1"));
+
+        // 说的是两件不同的事时，两句都要留。
+        failed.output = Some("另一件事".into());
+        let 两句 = card(&failed);
+        assert_eq!(两句.body.len(), 2, "{:?}", 两句.body);
     }
 
     #[test]

@@ -22,12 +22,12 @@ use agentrs_contracts::ids::{Digest, ExecutionId, Timestamp};
 use agentrs_contracts::policy::{InputHash, SandboxGrant};
 use agentrs_contracts::ports::SandboxExecutor;
 use agentrs_contracts::sandbox::{ExecutionOutcome, ExecutionRequest, ExecutionResult, IsolationLevel};
-use agentrs_dev_adapter::LocalFileSandbox;
+use agentrs_dev_adapter::LocalDevSandbox;
 
 const CS: &str = "cs-1";
 
 struct 夹具 {
-    sb: LocalFileSandbox,
+    sb: LocalDevSandbox,
     _dir: tempdir::TempDir,
     n: std::cell::Cell<u32>,
 }
@@ -38,7 +38,7 @@ impl 夹具 {
         std::fs::write(dir.path().join("a.rs"), "fn old() {}\n").unwrap();
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/b.rs"), "fn keep() {}\n").unwrap();
-        let sb = LocalFileSandbox::new(dir.path()).unwrap();
+        let sb = LocalDevSandbox::new(dir.path()).unwrap();
         Self {
             sb,
             _dir: dir,

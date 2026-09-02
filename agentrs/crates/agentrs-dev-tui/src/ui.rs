@@ -34,7 +34,7 @@ use crate::overlay::Overlay;
 use crate::state::AppState;
 use crate::status_line::{build_status_model, render_context_bar, render_segments, StatusContext};
 use crate::styling::StyledSegment;
-use crate::text::{display_width, truncate_to_width};
+use crate::text::{display_width, truncate_to_width, wrap_to_width};
 use crate::theme::{RowTone, Theme};
 use crate::transcript::TranscriptRow;
 use crate::working_line::WorkingLine;
@@ -369,6 +369,47 @@ fn caret_spans(row: &str, column: usize) -> Vec<Span<'static>> {
     ]
 }
 
+/// 审批面板上参数那几行。
+///
+/// 从前是一行被截断的 JSON。对文件工具尚可（路径在最前面），对 `Bash` 就不行了：
+/// 人要判断的恰恰是那条命令，而它长得几乎必然被截掉，于是面板上只剩
+/// `{"command":"find . -name '*.rs' -type f -exec wc…`——**要点正好在省略号后面**。
+///
+/// 所以：模型给的 `description` 单独占一行（它就是写给人看的），其余参数换行
+/// 铺开而不是截断。上限 6 行，够长的参数仍会被收住，但收住的是尾巴不是要点。
+fn argument_lines(arguments: &serde_json::Value, columns: usize) -> Vec<String> {
+    const 上限: usize = 6;
+    let mut out = Vec::new();
+    let mut rest = arguments.clone();
+
+    // `description` 是给人的一句话，不该混在 JSON 里跟转义字符一起读。
+    if let Some(obj) = rest.as_object_mut() {
+        if let Some(text) = obj
+            .remove("description")
+            .and_then(|v| v.as_str().map(str::to_string))
+        {
+            if !text.trim().is_empty() {
+                out.extend(wrap_to_width(&text, columns).into_iter().take(2));
+            }
+        }
+    }
+    let body = match rest.as_object() {
+        // 只剩一个字符串参数时（`command`、`url`、`query`）直接给原文——
+        // JSON 的引号与反斜杠在这里只是噪声，人读的是命令本身。
+        Some(obj) if obj.len() == 1 => match obj.values().next().and_then(|v| v.as_str()) {
+            Some(text) => text.to_string(),
+            None => rest.to_string(),
+        },
+        _ => rest.to_string(),
+    };
+    out.extend(wrap_to_width(&body, columns));
+    if out.len() > 上限 {
+        out.truncate(上限);
+        out.push(format!("… 参数共 {} 行，其余未显示", out.len()));
+    }
+    out
+}
+
 fn render_approval(frame: &mut Frame<'_>, area: Rect, view: &View<'_>, approval: &ApprovalView<'_>) {
     let request = approval.request;
     let columns = area.width as usize;
@@ -395,11 +436,13 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, view: &View<'_>, approval:
             ),
             view.theme.style(RowTone::System),
         )),
-        Line::from(Span::styled(
-            truncate_to_width(&format!("  {}", request.proposal.arguments), columns),
-            view.theme.style(RowTone::System).add_modifier(Modifier::DIM),
-        )),
     ];
+    for line in argument_lines(&request.proposal.arguments, columns.saturating_sub(2)) {
+        lines.push(Line::from(Span::styled(
+            format!("  {line}"),
+            view.theme.style(RowTone::System).add_modifier(Modifier::DIM),
+        )));
+    }
     for (index, option) in approval.options.iter().enumerate() {
         let selected = index == approval.selected;
         let marker = if selected { ">" } else { " " };
@@ -572,6 +615,44 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn 审批面板把命令原文完整摆出来() {
+        // 这条抓的是一个真的：面板从前只印一行截断的 JSON，于是
+        // `{"command":"find . -name '*.rs' -type f -exec wc…` 把要点正好留在
+        // 省略号后面，而人要判断的恰恰是那条命令。
+        let args = serde_json::json!({
+            "command": "find . -name '*.rs' -type f -exec wc -l {} + | tail -n 1",
+            "description": "统计工作区里 Rust 代码的总行数"
+        });
+        let lines = argument_lines(&args, 40);
+        let 全文 = lines.join("\n");
+        // 人话那一句在最前面，因为它就是写给人看的。
+        assert!(lines[0].contains("统计工作区"), "{lines:?}");
+        // 命令**每一段**都在，不是截断到第一行。
+        for 片段 in ["find .", "-name", "*.rs", "wc -l", "tail -n 1"] {
+            assert!(全文.contains(片段), "命令里的 {片段} 没了：{全文}");
+        }
+        // 只剩一个字符串参数时给原文，不给 JSON——引号与反斜杠在这里只是噪声。
+        assert!(!全文.contains("{\"command\""), "{全文}");
+    }
+
+    #[test]
+    fn 审批面板不会被超长参数撑满整屏() {
+        let args = serde_json::json!({"content": "x".repeat(4000)});
+        let lines = argument_lines(&args, 40);
+        assert!(lines.len() <= 7, "{} 行", lines.len());
+        assert!(lines.last().unwrap().contains("未显示"), "{lines:?}");
+    }
+
+    #[test]
+    fn 没有_description_时照样把参数摆出来() {
+        let lines = argument_lines(&serde_json::json!({"path": "src/main.rs"}), 40);
+        assert_eq!(lines, vec!["src/main.rs".to_string()]);
+        // 多参数保持 JSON：字段名此时是必要的，`old`/`new` 分不清就危险了。
+        let lines = argument_lines(&serde_json::json!({"path": "a", "old": "b", "new": "c"}), 60);
+        assert!(lines[0].contains("\"old\""), "{lines:?}");
+    }
 
     fn state() -> AppState {
         let mut state = AppState::default();

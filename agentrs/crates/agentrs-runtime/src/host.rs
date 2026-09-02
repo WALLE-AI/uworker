@@ -457,7 +457,14 @@ impl RuntimeHost {
             spec.context_budget,
             spec.spec_version,
         )
-        .with_workspace(workspace, format!("cs-{run_id}"))
+        .with_workspace(
+            workspace,
+            // 宿主没命名时才由内核派生。派生值是个默认值，不是规矩——
+            // 一个 ChangeSet 该活多久是宿主的事（会话），不是内核的事（Run）。
+            spec.change_set_id
+                .clone()
+                .unwrap_or_else(|| format!("cs-{run_id}").into()),
+        )
         .with_tools(tools)
         // 必须在 with_tools 之后：它要在**完整**目录上做投影。
         .with_permission_mode(spec.permission_mode.clone());
@@ -652,6 +659,7 @@ mod tests {
                 compaction_threshold_pct: 80,
             },
             execution_budget: ExecutionBudget::default(),
+            change_set_id: None,
             checkpoint: None,
             spec_version: v,
             config: Default::default(),
@@ -1040,6 +1048,94 @@ mod tests {
                 .flat_map(|message| message.content.iter())
                 .any(|block| matches!(block, ContentBlock::Thinking { .. })),
             "OpenAI 兼容端点不该收到 thinking 块"
+        );
+    }
+
+    #[tokio::test]
+    async fn 宿主命名的_change_set_压过内核派生的默认值() {
+        // 内核凭 run_id 造 ChangeSet id，等于替宿主决定了"一个 ChangeSet 只活一个
+        // Run"。多轮对话里每一轮是新 Run，于是第二轮读不到第一轮暂存的文件。
+        //
+        // 判据取 `StepIntent.change_set_id`：那是引擎实际交给下游的那个值，
+        // 而且它是 durable 的——恢复时凭它 reconcile，写错了后果不止于这一次调用。
+        use agentrs_contracts::event::EventPayload;
+        use agentrs_contracts::ids::ChangeSetId;
+
+        struct 一次调用;
+        #[async_trait::async_trait]
+        impl StepDriver for 一次调用 {
+            async fn call(&self, _r: LlmRequest) -> Result<Vec<LlmEvent>, String> {
+                Ok(vec![
+                    LlmEvent::ToolUse {
+                        id: "c1".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    },
+                    LlmEvent::Done {
+                        stop_reason: StopReason::ToolUse,
+                        usage: TokenUsage::default(),
+                    },
+                ])
+            }
+        }
+
+        async fn 意图的_change_set(named: Option<ChangeSetId>) -> String {
+            let host = RuntimeHost::new();
+            let persistence = Arc::new(agentrs_testkit::FakePersistence::new());
+            let mut spec = 规格("r-cs", SpecVersion(1));
+            spec.authority.tools = vec!["Read".into()];
+            spec.initial_capabilities.tools = vec!["Read".into()];
+            spec.change_set_id = named;
+            let deps = EngineDeps {
+                persistence: persistence.clone(),
+                event_sink: None,
+                clock: Arc::new(FixedClock(Timestamp(0))),
+                driver: Arc::new(一次调用),
+                admission: Arc::new(AdmitAll),
+                tools: Some(Arc::new(crate::toolround::ToolRoundDeps::minimal(
+                    Arc::new(agentrs_testkit::FakePolicy::allow_all()),
+                    Arc::new(agentrs_testkit::FakeSandbox::new()),
+                ))),
+                context: None,
+                components: None,
+            };
+            let run = host
+                .start_with_tools(
+                    spec,
+                    deps,
+                    TurnGuards::default(),
+                    vec![agentrs_types::ToolDef::read_only(
+                        "Read",
+                        "read",
+                        serde_json::json!({"type": "object"}),
+                    )],
+                )
+                .await
+                .unwrap();
+            run.handle
+                .submit(UserInput::Message(vec![ContentBlock::text("go")]))
+                .await
+                .unwrap();
+            run.driver.await;
+            persistence
+                .events()
+                .iter()
+                .find_map(|event| match &event.payload {
+                    EventPayload::StepIntentRecorded { intent } => {
+                        Some(intent.change_set_id.as_str().to_string())
+                    }
+                    _ => None,
+                })
+                .expect("有一条意图")
+        }
+
+        // 缺省：内核按 run_id 派生。
+        assert_eq!(意图的_change_set(None).await, "cs-r-cs");
+        // 宿主命名：内核照办，多轮对话才能共用一个 ChangeSet。
+        assert_eq!(
+            意图的_change_set(Some("cs-session-7".into())).await,
+            "cs-session-7"
         );
     }
 

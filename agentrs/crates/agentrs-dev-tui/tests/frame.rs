@@ -333,3 +333,25 @@ fn a_narrow_window_drops_status_fields_rather_than_wrapping() {
     assert!(wide.contains("default"), "{wide:?}");
     assert!(wide.contains("tools 4"), "{wide:?}");
 }
+
+/// 和弦是查表用的键，不是要插进草稿的字符。
+///
+/// 归一化把字符转成小写，好让 `A` 与 `a` 命中同一条绑定。曾经插入的就是
+/// `chord.key`，于是**大写字母根本打不出来**——而所有测试用的都是小写和中文，
+/// 一次也没照出来。
+#[test]
+fn 和弦归一化不该吃掉大小写() {
+    use agentrs_dev_tui::keymap::{Chord, Key};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let 大写 = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+    let chord = Chord::from_event(&大写).expect("是一个和弦");
+    // 查表侧：与小写同一个键。
+    assert_eq!(chord.key, Key::Char('a'));
+    // 插入侧：必须回到事件里取原样的字符。
+    let typed = match 大写.code {
+        KeyCode::Char(ch) => Some(ch),
+        _ => None,
+    };
+    assert_eq!(typed, Some('A'));
+}

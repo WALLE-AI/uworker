@@ -14,7 +14,7 @@ use agentrs_contracts::ports::PolicyEnforcer;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::LocalFileSandbox;
+use crate::LocalDevSandbox;
 
 /// 人工审批回答。开发 TUI 只支持一次性放行或拒绝。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub struct ApprovalPrompt {
 pub struct InteractiveDevPolicy {
     auto_allowed: HashSet<String>,
     approval_required: HashSet<String>,
-    sandbox: Arc<LocalFileSandbox>,
+    sandbox: Arc<LocalDevSandbox>,
     requests: mpsc::Sender<ApprovalPrompt>,
     now: Timestamp,
     wait_limit: Duration,
@@ -63,23 +63,47 @@ pub struct InteractiveDevPolicy {
 /// 进程内策略实例计数器。
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
+/// 这次批准，人实际上是在为什么负责。
+///
+/// 从前这里是一句写死的 "{tool} requests workspace access"。加进命令与网络之后
+/// 它开始骗人：`Bash` 要的不是"工作区访问"，是**任意执行**；`WebFetch` 一个
+/// 字节也不碰工作区，它要的是**把一个地址发出去**。审批面板上那一行是人唯一
+/// 会读的东西，它说错了，人点头时同意的就不是他以为的那件事。
+fn 风险(tool: &str) -> String {
+    match tool {
+        "Bash" => "执行任意命令。副作用**直接落盘**，不进 ChangeSet，事后无法回滚".into(),
+        "WebFetch" => "向外发起一次 HTTP 请求。请求发出去就收不回来，对方的日志里会有它".into(),
+        "WebSearch" => "把这段检索词发给外部搜索端点".into(),
+        "Delete" => "删除工作区文件，改动先进 ChangeSet，提交前可以反悔".into(),
+        "Write" | "Edit" => "修改工作区文件，改动先进 ChangeSet，提交前可以反悔".into(),
+        other => format!("{other} 请求超出自动放行范围的权限"),
+    }
+}
+
 impl InteractiveDevPolicy {
+    /// 切分一份目录：自动放行的一张表，逐次审批的一张表。
+    ///
+    /// 判据与工具目录同源（[`agentrs_tools::builtin::split_for_approval`]），
+    /// 宿主别再手抄工具名：目录里新增一个工具而策略的两张表没跟上，那个工具就
+    /// **永远调不动**——症状是模型反复提出一个被判 `OutOfAuthority` 的调用，
+    /// 而目录里明明有它，于是它开始换着法子绕，把一整个 Run 耗在猜上。
+    pub fn split_by_effect(catalog: &[agentrs_types::ToolDef]) -> (Vec<String>, Vec<String>) {
+        agentrs_tools::builtin::split_for_approval(catalog)
+    }
+
     /// 构造测试策略。两个工具集合不得重叠；未列出的工具一律拒绝。
     pub fn new(
-        sandbox: Arc<LocalFileSandbox>,
-        auto_allowed: impl IntoIterator<Item = &'static str>,
-        approval_required: impl IntoIterator<Item = &'static str>,
+        sandbox: Arc<LocalDevSandbox>,
+        auto_allowed: impl IntoIterator<Item = impl Into<String>>,
+        approval_required: impl IntoIterator<Item = impl Into<String>>,
         requests: mpsc::Sender<ApprovalPrompt>,
         now: Timestamp,
         wait_limit: Duration,
     ) -> Result<Self, PolicyError> {
-        let auto_allowed = auto_allowed
-            .into_iter()
-            .map(str::to_string)
-            .collect::<HashSet<_>>();
+        let auto_allowed = auto_allowed.into_iter().map(Into::into).collect::<HashSet<_>>();
         let approval_required = approval_required
             .into_iter()
-            .map(str::to_string)
+            .map(Into::into)
             .collect::<HashSet<_>>();
         if !auto_allowed.is_disjoint(&approval_required) {
             return Err(PolicyError::Other {
@@ -184,7 +208,7 @@ impl PolicyEnforcer for InteractiveDevPolicy {
         if self.approval_required.contains(&proposal.tool_name) {
             return Ok(PolicyDecision::RequireApproval(ApprovalRequest {
                 step_id: proposal.step_id.clone(),
-                risk_summary: format!("{} requests workspace access", proposal.tool_name),
+                risk_summary: 风险(&proposal.tool_name),
                 proposal,
                 originating_member: None,
                 team_id: None,
@@ -247,12 +271,38 @@ mod tests {
         tempdir::TempDir,
     ) {
         let dir = tempdir::TempDir::new("agentrs-interactive-policy").unwrap();
-        let sandbox = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let sandbox = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
         let (tx, rx) = mpsc::channel(4);
         let policy = Arc::new(
             InteractiveDevPolicy::new(sandbox, ["Read"], ["Write"], tx, Timestamp(0), wait).unwrap(),
         );
         (policy, rx, dir)
+    }
+
+    #[test]
+    fn 切分覆盖目录里的每一个工具() {
+        // 这条测试存在的理由是它抓到过一次真的：目录里加了 Glob、两张表没跟上，
+        // 于是 Glob 每次调用都被判 OutOfAuthority，而目录里明明有它。
+        let catalog = agentrs_tools::builtin::catalog(agentrs_tools::builtin::Capabilities::ALL);
+        let (auto, approval) = InteractiveDevPolicy::split_by_effect(&catalog);
+        assert_eq!(
+            auto.len() + approval.len(),
+            catalog.len(),
+            "每个工具都要落进其中一张表"
+        );
+        assert!(auto.contains(&"Glob".to_string()));
+        assert!(auto.contains(&"Read".to_string()));
+        assert!(approval.contains(&"Write".to_string()));
+        // 会改东西的绝不能落进"自动放行"。
+        for name in &auto {
+            let tool = catalog.iter().find(|t| &t.name == name).unwrap();
+            assert!(tool.is_read_only(), "{name} 会改东西却被自动放行");
+        }
+        // 反过来不成立：只读的也可能要审批。`WebFetch` 不改工作区，
+        // 但它把一个模型选定的地址发了出去，那件事收不回来。
+        assert!(approval.contains(&"Bash".to_string()));
+        assert!(approval.contains(&"WebFetch".to_string()));
+        assert!(approval.contains(&"WebSearch".to_string()));
     }
 
     #[tokio::test]
@@ -261,7 +311,7 @@ mod tests {
         // overlay 必须留在同一个 Sandbox 上。号重了，第二轮的第一次写会被 H1
         // 的一次性台账判成 GrantAlreadyConsumed。
         let dir = tempdir::TempDir::new("agentrs-grant-ids").unwrap();
-        let sandbox = Arc::new(LocalFileSandbox::new(dir.path()).unwrap());
+        let sandbox = Arc::new(LocalDevSandbox::new(dir.path()).unwrap());
         let mut ids = std::collections::HashSet::new();
         for _ in 0..3 {
             let (tx, _rx) = mpsc::channel(4);

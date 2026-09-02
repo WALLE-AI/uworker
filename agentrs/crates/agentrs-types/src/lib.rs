@@ -7,13 +7,23 @@
 
 #![forbid(unsafe_code)]
 
+/// 压缩边界的元数据与触发方式。
+pub mod compact;
+/// 模型读过的文件状态（读去重用）。
+pub mod file_state;
+/// 技能相关的共享类型。
+pub mod skill_types;
+pub mod glob;
 pub mod llm;
 pub mod message;
+pub mod schema;
 pub mod tool;
 
+pub use glob::{glob_match, leaf, under};
 pub use llm::{LlmEvent, LlmRequest, ThinkingConfig};
 pub use message::{
     extension_to_image_media_type, ContentBlock, ImageInputCapability, ImageUrl, Message, Role, StopReason,
     TokenUsage, SUPPORTED_IMAGE_MEDIA_TYPES,
 };
+pub use schema::{describe_all, validate, Violation};
 pub use tool::ToolDef;

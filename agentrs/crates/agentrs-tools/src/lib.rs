@@ -7,7 +7,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod builtin;
+pub mod lint;
 pub mod mcp;
+/// 工具的运行期授权策略。
+pub mod tool_policy;
 
 use std::collections::{BTreeMap, BTreeSet};
 

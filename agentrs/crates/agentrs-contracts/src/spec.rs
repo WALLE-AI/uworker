@@ -152,6 +152,19 @@ pub struct RunSpec {
     pub context_budget: ContextBudget,
     /// 执行预算。
     pub execution_budget: ExecutionBudget,
+    /// 本 Run 写入的 ChangeSet。**由宿主命名**，缺省时内核按 `run_id` 派生。
+    ///
+    /// 加这个字段是因为内核凭 `run_id` 造 ChangeSet id，等于替宿主决定了
+    /// "一个 ChangeSet 只活一个 Run"。而 Run 是内核的单位、会话是宿主的单位：
+    /// 多轮对话里每一轮是一个新 Run，若每轮都换 ChangeSet，第二轮就**读不到**
+    /// 第一轮暂存尚未提交的文件——overlay 按 ChangeSet 隔离——而人按一次提交
+    /// 也只会落其中一轮的改动。
+    ///
+    /// 这不与 fork 规则 5（"不继承任何 live 状态"）冲突：那条列的是 Run 作用域的
+    /// 活物（inbox、未决审批、in-flight 工具、grant）。工作区与 ChangeSet 归 Core，
+    /// 让宿主给它命名，正是把这份归属还给宿主。
+    #[serde(default)]
+    pub change_set_id: Option<crate::ids::ChangeSetId>,
     /// 恢复检查点。
     pub checkpoint: Option<RunCheckpoint>,
     /// schema 版本。
@@ -329,6 +342,7 @@ mod tests {
                     compaction_threshold_pct: 80,
                 },
                 execution_budget: ExecutionBudget::default(),
+                change_set_id: None,
                 checkpoint: None,
                 spec_version: SpecVersion(1),
                 config: Default::default(),
@@ -369,6 +383,7 @@ mod tests {
                     compaction_threshold_pct: 50,
                 },
                 execution_budget: ExecutionBudget::default(),
+                change_set_id: None,
                 checkpoint: None,
                 spec_version: SpecVersion(1),
                 config: Default::default(),

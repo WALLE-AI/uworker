@@ -22,6 +22,30 @@ pub enum SseFrame {
     Done,
 }
 
+/// 把 Bedrock 的一条事件载荷解成 SSE 帧。
+///
+/// Ported from aionrs (Apache-2.0), crates/aion-providers.
+///   Source: crates/aion-providers/src/framing.rs @ f711174（`bedrock_payload_to_frame`）
+///   Copied: 2026-09-01   Modified: yes
+///   Changes: 返回本仓库的 `SseFrame` 而不是自带的 `Frame`；事件类型不再单独
+///            带出——投影器从载荷自身的 `type` 字段读，两处各存一份迟早会分叉。
+///
+/// **Bedrock 不发裸 SSE。** 它把每条事件包成 `{"bytes":"<base64>"}`，
+/// 解开才是那条 Anthropic 事件。`anthropic_wire` 支持 Bedrock 端点，
+/// 而解帧器不认这层包装的话，那份支持到流式这一步就断了。
+pub fn bedrock_payload_to_frame(payload: &[u8]) -> Option<SseFrame> {
+    use base64::Engine as _;
+
+    let wrapper: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let b64 = wrapper.get("bytes")?.as_str()?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    // 解出来必须是合法 UTF-8 的 JSON。不是的话宁可丢掉这一帧，
+    // 也不要把二进制塞进后面的 JSON 解析器——那里的报错会指向错误的地方。
+    let inner = String::from_utf8(decoded).ok()?;
+    serde_json::from_str::<serde_json::Value>(&inner).ok()?;
+    Some(SseFrame::Data(inner))
+}
+
 impl SseDecoder {
     /// 新建解帧器。
     pub fn new() -> Self {
@@ -138,5 +162,40 @@ mod tests {
         let mut d = SseDecoder::new();
         assert!(d.push("data: last\n").is_empty());
         assert_eq!(d.finish(), vec![SseFrame::Data("last".into())]);
+    }
+
+    #[test]
+    fn bedrock_的_base64_包装被解开() {
+        // Bedrock 不发裸 SSE：每条事件包成 {"bytes":"<base64>"}。
+        // 解帧器不认这层包装，anthropic_wire 的 Bedrock 支持到流式这步就断了。
+        let inner = r#"{"type":"content_block_delta","delta":{"text":"hi"}}"#;
+        let b64 = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(inner)
+        };
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        assert_eq!(
+            bedrock_payload_to_frame(payload.as_bytes()),
+            Some(SseFrame::Data(inner.to_string()))
+        );
+    }
+
+    #[test]
+    fn 不是_bedrock_包装的返回_none() {
+        assert_eq!(bedrock_payload_to_frame(b"not json"), None);
+        assert_eq!(bedrock_payload_to_frame(br#"{"other":1}"#), None);
+        assert_eq!(bedrock_payload_to_frame(br#"{"bytes":123}"#), None);
+    }
+
+    #[test]
+    fn 解出来不是合法_json_就丢掉这一帧() {
+        // 宁可丢，也不要把二进制塞进后面的 JSON 解析器——
+        // 那里的报错会指向错误的地方，排查的人会去查投影器。
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode("不是 json");
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        assert_eq!(bedrock_payload_to_frame(payload.as_bytes()), None);
+        // 坏的 base64 同样。
+        assert_eq!(bedrock_payload_to_frame(br#"{"bytes":"!!!!"}"#), None);
     }
 }

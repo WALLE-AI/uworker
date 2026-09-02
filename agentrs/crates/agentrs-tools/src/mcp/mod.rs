@@ -3,6 +3,15 @@
 //! 本模块不启动 MCP 进程、不持有凭据、也不执行调用。Core/Sandbox 提供目录并执行；
 //! AgentRS 只把远端名称映射为不可冲突的本地工具名，调用仍走 Policy -> SandboxGrant。
 
+/// MCP 的线格式（JSON-RPC 报文与 MCP 载荷类型）。
+pub mod wire;
+
+pub use wire::{
+    ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, McpContent, McpResource, McpToolDef, McpToolResult,
+    ResourceContent, ResourcesListResult, ResourcesReadResult, ToolsListResult, PROTOCOL_VERSION,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use agentrs_contracts::authority::CapabilityView;
