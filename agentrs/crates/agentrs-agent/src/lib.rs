@@ -18,6 +18,7 @@ pub mod skill_tool;
 pub mod spawn_tool;
 pub mod spawner;
 mod stream;
+pub mod summarizer;
 mod tool_call;
 pub mod tool_policy;
 mod turn;

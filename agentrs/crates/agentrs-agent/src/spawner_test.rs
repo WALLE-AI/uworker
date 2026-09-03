@@ -63,4 +63,31 @@ mod phase7_tests {
         assert_eq!(config.name, "test-agent");
         assert_eq!(config.max_turns, 5);
     }
+
+    // --- TC-3.0-05: a child cannot regain a tool the parent was denied ---
+
+    #[test]
+    fn a_child_cannot_recover_a_network_tool_its_parent_was_denied() {
+        let parent = ToolPolicy::allow_only(["Read", "WebSearch"]);
+        let requested = vec!["Read".to_string(), "WebFetch".to_string(), "WebSearch".to_string()];
+
+        let child = effective_child_tool_policy(&parent, &requested);
+
+        assert!(child.allows("Read"));
+        assert!(child.allows("WebSearch"));
+        assert!(
+            !child.allows("WebFetch"),
+            "a fork override narrows the parent policy; it must never widen it"
+        );
+    }
+
+    #[test]
+    fn a_child_with_no_overrides_inherits_the_parent_network_restrictions() {
+        let parent = ToolPolicy::allow_only(["Read"]);
+
+        let child = effective_child_tool_policy(&parent, &[]);
+
+        assert!(!child.allows("WebFetch"));
+        assert!(!child.allows("WebSearch"));
+    }
 }

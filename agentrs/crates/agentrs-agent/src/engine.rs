@@ -49,6 +49,7 @@ use anyhow::{Error as AnyhowError, Result as AnyhowResult};
 use chrono::Utc;
 use serde_json::to_string;
 use tokio::sync::mpsc::Receiver;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
@@ -117,6 +118,11 @@ pub struct AgentEngine {
     allow_list: Vec<String>,
     /// Optional hook engine for lifecycle and tool hooks.
     hooks: Option<HookEngine>,
+    /// Cancels tool execution for the current turn.
+    ///
+    /// Long-running tools (network fetches) observe this so an interrupted turn
+    /// does not have to wait out their request timeout.
+    turn_cancel: CancellationToken,
 
     // Session persistence.
     /// Optional session manager used when persistence is enabled.
@@ -228,6 +234,7 @@ impl AgentEngine {
             confirmer: Arc::new(Mutex::new(confirmer)),
             allow_list,
             hooks: Some(HookEngine::new_with_env(config.hooks.clone(), cwd.clone(), runtime_env)),
+            turn_cancel: CancellationToken::new(),
             session_manager,
             current_session: None,
             output,
@@ -327,6 +334,7 @@ impl AgentEngine {
             confirmer: Arc::new(Mutex::new(confirmer)),
             allow_list,
             hooks: Some(HookEngine::new_with_env(config.hooks.clone(), cwd, runtime_env)),
+            turn_cancel: CancellationToken::new(),
             session_manager,
             current_session: Some(session),
             output,
@@ -507,6 +515,7 @@ impl AgentEngine {
     }
 
     async fn run_inner(&mut self, content_blocks: Vec<ContentBlock>, msg_id: &str) -> Result<AgentResult, AgentError> {
+        self.reset_turn_cancel();
         self.msg_id = msg_id.to_string();
         self.current_turn_id = Some(
             self.pending_turn_id
@@ -779,6 +788,7 @@ impl AgentEngine {
                 self.compact_level,
                 self.toon_enabled,
                 self.compact_config.tool_output_max_bytes,
+                &self.turn_cancel,
             )
             .await
             {
@@ -798,6 +808,7 @@ impl AgentEngine {
                 self.compact_level,
                 self.toon_enabled,
                 self.compact_config.tool_output_max_bytes,
+                &self.turn_cancel,
             )
             .await
             {
@@ -1587,6 +1598,22 @@ impl AgentEngine {
         }
     }
 
+    /// Cancel any tool currently executing, and arm the token so a tool that
+    /// starts before the next run is set up also stops immediately.
+    ///
+    /// [`Self::abort_current_turn`] calls this; hosts that interrupt without
+    /// closing the turn can call it directly.
+    pub fn cancel_running_tools(&mut self) {
+        self.turn_cancel.cancel();
+    }
+
+    /// Arm a fresh cancellation scope for a new run.
+    fn reset_turn_cancel(&mut self) {
+        if self.turn_cancel.is_cancelled() {
+            self.turn_cancel = CancellationToken::new();
+        }
+    }
+
     /// Close a partially recorded turn after the host cancels execution.
     ///
     /// Providers in the Anthropic family require every assistant `tool_use` to
@@ -1595,6 +1622,11 @@ impl AgentEngine {
     /// already be in memory without its matching results. Add synthetic error
     /// results so the next request can safely reuse this history.
     pub fn abort_current_turn(&mut self, reason: &str) {
+        // Release any tool still blocked on the network before recording the
+        // synthetic results, so an in-flight fetch does not keep running behind
+        // a turn that has already been closed out.
+        self.cancel_running_tools();
+
         let Some(last_message) = self.messages.last() else {
             return;
         };

@@ -137,7 +137,40 @@ max_tool_call_failure_turns = 2
 
 [tools]
 auto_approve = false
-allow_list = ["Read", "Grep", "Glob"]
+# A bare tool name approves every call. WebFetch also accepts a
+# `WebFetch:domain:<host>` entry, which approves that host and its subdomains only.
+allow_list = ["Read", "Grep", "Glob", "WebFetch:domain:docs.rs"]
+
+[web]
+enabled = true                 # set false to unregister WebFetch and WebSearch
+timeout_secs = 60
+max_content_bytes = 10485760   # 10 MB, enforced while streaming
+max_redirects = 10             # same-host hops before giving up
+max_url_length = 2000
+max_markdown_chars = 100000    # page text kept before truncation
+cache_ttl_secs = 900
+cache_max_bytes = 52428800     # 50 MB response cache
+
+# Loopback, link-local (incl. 169.254.169.254), RFC1918, and unique-local
+# destinations are refused unless this is on. Turn it on only to reach a local
+# dev server or an internal service you control.
+allow_private_network = false
+allow_domains = []             # non-empty turns this into a whitelist
+deny_domains = []              # takes precedence over allow_domains
+# Hosts whose markdown is returned verbatim, skipping the summarizer. Matching is
+# strict: `docs.rs` is that host only, `*.rust-lang.org` includes subdomains, and
+# `github.com/anthropics` narrows to a path prefix.
+preapproved_domains = []
+# user_agent = "agentrs/1.0"   # blank means a version-derived default
+
+[web.search]
+# duckduckgo needs no key but scrapes an HTML page: best-effort, and not a
+# supported access path. brave/tavily need a key; searxng needs base_url.
+backend = "none"               # none | duckduckgo | brave | tavily | searxng
+api_key_env = "BRAVE_API_KEY"  # env var holding the provider key
+base_url = ""                  # required for a self-hosted searxng instance
+max_results = 10
+timeout_secs = 30
 
 [session]
 enabled = true

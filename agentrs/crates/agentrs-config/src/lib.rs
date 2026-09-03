@@ -11,3 +11,4 @@ pub mod plan;
 pub mod schema;
 pub mod shell;
 pub mod tui;
+pub mod web;

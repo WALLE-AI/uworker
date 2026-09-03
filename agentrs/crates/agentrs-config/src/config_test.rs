@@ -1766,4 +1766,100 @@ context_window = 200000
             CompactContextWindowSource::Explicit
         );
     }
+
+    // --- TC-0.5-04: [web] cascades global -> project ---
+
+    #[test]
+    fn test_merge_web_project_overrides_global_wholesale() {
+        let global = ConfigFile {
+            web: crate::web::WebConfig {
+                deny_domains: vec!["global-blocked.com".to_string()],
+                timeout_secs: 90,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            web: crate::web::WebConfig {
+                allow_private_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = merge_config_files(global, project);
+
+        assert!(merged.web.allow_private_network);
+        // Host policy is replaced as a unit, never unioned: silently combining
+        // two files' domain lists would widen reach in a way neither states.
+        assert!(
+            merged.web.deny_domains.is_empty(),
+            "the global deny list must not survive into a project that redefines [web]"
+        );
+        assert_eq!(
+            merged.web.timeout_secs, 60,
+            "unset project fields fall back to defaults, not to global"
+        );
+    }
+
+    #[test]
+    fn test_merge_web_absent_project_section_keeps_global() {
+        let global = ConfigFile {
+            web: crate::web::WebConfig {
+                enabled: false,
+                deny_domains: vec!["blocked.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = merge_config_files(global, ConfigFile::default());
+
+        assert!(
+            !merged.web.enabled,
+            "a project file with no [web] must not re-enable it"
+        );
+        assert_eq!(merged.web.deny_domains, vec!["blocked.com".to_string()]);
+    }
+
+    // --- The generated config template must round-trip through our own parser ---
+
+    #[test]
+    fn default_config_template_parses_into_a_config_file() {
+        let parsed: ConfigFile = toml::from_str(super::DEFAULT_CONFIG_TEMPLATE)
+            .expect("`agentrs config init` must emit a file this build can read back");
+
+        // Uncommented sections carry real values.
+        assert!(parsed.web.enabled, "[web] is active in the template");
+        assert_eq!(
+            parsed.web.search.backend,
+            crate::web::SearchBackendKind::None,
+            "search stays off until the user picks a backend"
+        );
+        assert!(!parsed.tools.auto_approve);
+    }
+
+    // The template is the only place most users learn WebSearch exists: it is
+    // never registered by default, so an undocumented switch is an invisible one.
+    #[test]
+    fn default_config_template_documents_how_to_enable_web_search() {
+        let template = super::DEFAULT_CONFIG_TEMPLATE;
+
+        assert!(template.contains("[web.search]"), "the section must be discoverable");
+        for backend in ["duckduckgo", "brave", "tavily", "searxng"] {
+            assert!(template.contains(backend), "{backend} should be listed as a choice");
+        }
+        assert!(
+            template.contains("api_key_env"),
+            "the key must be shown as coming from the environment, not inlined"
+        );
+        assert!(
+            template.contains("allow_private_network"),
+            "the SSRF escape hatch must be visible and documented"
+        );
+        assert!(
+            template.contains("terms invite") || template.contains("best-effort"),
+            "the scraping backend's caveat must ship with the option, not only in the docs"
+        );
+    }
 }

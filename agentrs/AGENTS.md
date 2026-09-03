@@ -6,9 +6,10 @@ Rules and conventions for AI assistants and contributors working on agentrs.
 
 agentrs is a **multi-provider AI agent CLI** written in Rust. It connects to
 LLM providers (Anthropic, OpenAI, AWS Bedrock, Google Vertex AI), orchestrates
-built-in tools (Read, Write, Edit, ExecCommand, Grep, Glob, ViewImage, Spawn), supports MCP
-servers, skills, hooks, and long-term memory. It also exposes a JSON stream
-protocol for host integration (e.g. Electron-based AgentrsUI).
+built-in tools (Read, Write, Edit, ExecCommand, Grep, Glob, ViewImage, WebFetch,
+WebSearch, Spawn), supports MCP servers, skills, hooks, and long-term memory. It
+also exposes a JSON stream protocol for host integration (e.g. Electron-based
+AgentrsUI).
 
 Tech stack: Rust 2021 edition, stable toolchain, Cargo workspace under `crates/`.
 
@@ -23,7 +24,7 @@ Dependencies flow **downward** — never introduce circular or upward references
 | Mid | `agentrs-config` | Configuration, ProviderCompat, auth, hooks, logging (`create_file_layer`), **cross-platform shell helpers** |
 | Mid | `agentrs-protocol` | JSON stream protocol (events, commands, approval manager) for host integration |
 | Mid | `agentrs-providers` | LLM provider implementations (Anthropic, OpenAI, Bedrock, Vertex) |
-| Mid | `agentrs-tools` | Local tools (Read, Write, Edit, ExecCommand, Grep, Glob, ViewImage, ToolSearch) |
+| Mid | `agentrs-tools` | Local tools (Read, Write, Edit, ExecCommand, Grep, Glob, ViewImage, ToolSearch) and network tools (WebFetch, WebSearch) |
 | Mid | `agentrs-mcp` | MCP (Model Context Protocol) client |
 | Mid | `agentrs-skills` | Skills system (prompt snippets, hooks, permissions, shell expansion) |
 | Mid | `agentrs-memory` | Long-term cross-session memory (user prefs, feedback, project context) |

@@ -5,6 +5,7 @@ use agentrs_protocol::events::ToolCategory;
 use agentrs_types::tool::{JsonSchema, ToolDef, ToolResult};
 
 use crate::Tool;
+use crate::gating::missing_tool_hint;
 
 /// Built-in tool that searches for deferred tools and loads their full schema.
 /// Core tool (never deferred itself) — always available to the LLM.
@@ -74,8 +75,15 @@ impl Tool for ToolSearchTool {
             .collect();
 
         if matches.is_empty() {
+            // A gated-off tool looks identical to a typo from here, so say
+            // which it is rather than leaving the caller to guess.
+            let hint = missing_tool_hint(query, |name| self.tool_defs.iter().any(|def| def.name == name));
+            let content = match hint {
+                Some(hint) => format!("No deferred tools matching \"{query}\" found. {hint}"),
+                None => format!("No deferred tools matching \"{query}\" found."),
+            };
             return ToolResult {
-                content: format!("No deferred tools matching \"{}\" found.", query),
+                content,
                 is_error: false,
             };
         }

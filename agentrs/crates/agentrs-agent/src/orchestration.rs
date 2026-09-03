@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::confirm::{ConfirmResult, ToolConfirmer};
 use agentrs_config::compact::CompactConfig;
 use agentrs_config::hooks::HookEngine;
@@ -10,6 +12,7 @@ use agentrs_types::message::ContentBlock;
 use agentrs_types::skill_types::ContextModifier;
 use agentrs_types::tool::ToolResult;
 
+use agentrs_tools::gating::missing_tool_hint;
 use agentrs_tools::{registry::ToolRegistry, truncate_utf8};
 
 /// The combined output of a tool execution batch: protocol content blocks
@@ -50,6 +53,7 @@ pub async fn execute_tool_calls(
         compaction_level,
         toon_enabled,
         CompactConfig::default().tool_output_max_bytes,
+        &CancellationToken::new(),
     )
     .await
 }
@@ -63,6 +67,7 @@ pub(crate) async fn execute_tool_calls_with_output_limit(
     compaction_level: agentrs_compact::CompactLevel,
     toon_enabled: bool,
     tool_output_max_bytes: usize,
+    cancel: &CancellationToken,
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
@@ -95,6 +100,7 @@ pub(crate) async fn execute_tool_calls_with_output_limit(
                         compaction_level,
                         toon_enabled,
                         tool_output_max_bytes,
+                        cancel,
                     )
                 })
                 .collect();
@@ -125,6 +131,7 @@ pub(crate) async fn execute_tool_calls_with_output_limit(
                                 compaction_level,
                                 toon_enabled,
                                 tool_output_max_bytes,
+                                cancel,
                             )
                             .await;
                         }
@@ -150,6 +157,17 @@ pub(crate) async fn execute_tool_calls_with_output_limit(
     })
 }
 
+/// Explain a missing tool.
+///
+/// Some tools are compiled in but only registered once configured, so a bare
+/// "Unknown tool" cannot be told apart from a typo.
+fn unknown_tool_message(registry: &ToolRegistry, name: &str) -> String {
+    match missing_tool_hint(name, |tool| registry.get(tool).is_some()) {
+        Some(hint) => format!("Unknown tool: {name}. {hint}"),
+        None => format!("Unknown tool: {name}"),
+    }
+}
+
 /// Signal that the user wants to abort
 #[derive(Debug)]
 pub enum ExecutionControl {
@@ -169,7 +187,7 @@ fn confirm_call(
     let result = confirmer
         .lock()
         .unwrap()
-        .check(name, &truncate_display(&input_display, 200));
+        .check(name, input, &truncate_display(&input_display, 200));
 
     match result {
         ConfirmResult::Approved => Ok(None),
@@ -189,6 +207,7 @@ async fn execute_single(
     compaction_level: agentrs_compact::CompactLevel,
     toon_enabled: bool,
     tool_output_max_bytes: usize,
+    cancel: &CancellationToken,
 ) -> (ContentBlock, Option<ContextModifier>, Vec<ContentBlock>) {
     let ContentBlock::ToolUse { id, name, input, .. } = call else {
         unreachable!("execute_single called with non-ToolUse block")
@@ -215,7 +234,7 @@ async fn execute_single(
     let (result, modifier, follow_up_blocks) = match registry.get(name) {
         Some(tool) => {
             let max_size = tool.max_result_size();
-            let execution = tool.execute_with_follow_up(input.clone()).await;
+            let execution = tool.execute_with_follow_up(input.clone(), cancel.clone()).await;
             let r = execution.result;
             let modifier = if r.is_error {
                 None
@@ -262,7 +281,7 @@ async fn execute_single(
         }
         None => (
             ToolResult {
-                content: format!("Unknown tool: {}", name),
+                content: unknown_tool_message(registry, name),
                 is_error: true,
             },
             None,
@@ -318,6 +337,7 @@ pub async fn execute_tool_calls_with_approval(
         compaction_level,
         toon_enabled,
         CompactConfig::default().tool_output_max_bytes,
+        &CancellationToken::new(),
     )
     .await
 }
@@ -335,6 +355,7 @@ pub(crate) async fn execute_tool_calls_with_approval_and_output_limit(
     compaction_level: agentrs_compact::CompactLevel,
     toon_enabled: bool,
     tool_output_max_bytes: usize,
+    cancel: &CancellationToken,
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
@@ -411,6 +432,7 @@ pub(crate) async fn execute_tool_calls_with_approval_and_output_limit(
                 compaction_level,
                 toon_enabled,
                 tool_output_max_bytes,
+                cancel,
             )
             .await;
         }

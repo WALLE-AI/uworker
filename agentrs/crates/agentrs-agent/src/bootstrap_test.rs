@@ -7,6 +7,7 @@ mod tests {
     use std::sync::Arc;
 
     use agentrs_config::config::{CliArgs, McpServerConfig, TransportType};
+    use agentrs_config::web::SearchBackendKind;
     use agentrs_protocol::events::ToolCategory;
     use agentrs_tools::Tool;
     use agentrs_types::tool::ToolResult;
@@ -158,5 +159,118 @@ mod tests {
         assert!(allowed.content.contains("AllowedDeferred"));
         assert!(denied.content.starts_with("No deferred tools matching"));
         assert!(!denied.content.contains("\"name\": \"DeniedDeferred\""));
+    }
+
+    // --- Web tool registration (TC-1.6-06, TC-2.3-01 through TC-2.3-05) ---
+
+    fn registered_web_tools(config: Config) -> Vec<String> {
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let provider = create_provider(&config);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let mut registry = ToolRegistry::new();
+
+        bootstrap.register_web_tools(&mut registry, &provider, std::path::Path::new("/tmp"));
+
+        registry.tool_names()
+    }
+
+    #[test]
+    fn web_fetch_is_registered_by_default() {
+        let names = registered_web_tools(test_config());
+        assert!(names.contains(&"WebFetch".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn disabling_web_removes_both_tools_from_the_registry() {
+        let mut config = test_config();
+        config.web.enabled = false;
+
+        let names = registered_web_tools(config);
+        assert!(
+            names.is_empty(),
+            "the model must not see a tool it cannot use: {names:?}"
+        );
+    }
+
+    #[test]
+    fn web_search_is_absent_when_no_backend_is_configured() {
+        let names = registered_web_tools(test_config());
+        assert!(
+            !names.contains(&"WebSearch".to_string()),
+            "search defaults to no backend and must not be advertised: {names:?}"
+        );
+    }
+
+    #[test]
+    fn web_search_is_absent_when_its_api_key_is_missing() {
+        let mut config = test_config();
+        config.web.search.backend = SearchBackendKind::Brave;
+        config.web.search.api_key_env = "AGENTRS_TEST_BOOTSTRAP_MISSING_KEY".to_string();
+        unsafe { std::env::remove_var("AGENTRS_TEST_BOOTSTRAP_MISSING_KEY") };
+
+        let names = registered_web_tools(config);
+        assert!(
+            !names.contains(&"WebSearch".to_string()),
+            "a configured-but-unusable backend must not be advertised: {names:?}"
+        );
+        assert!(names.contains(&"WebFetch".to_string()), "WebFetch is unaffected");
+    }
+
+    #[test]
+    fn web_search_is_registered_for_a_key_less_backend_with_a_base_url() {
+        let mut config = test_config();
+        config.web.search.backend = SearchBackendKind::Searxng;
+        config.web.search.base_url = "https://searx.example".to_string();
+
+        let names = registered_web_tools(config);
+        assert!(names.contains(&"WebSearch".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn an_unregistered_web_search_is_invisible_to_the_model() {
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let config = test_config();
+        let provider = create_provider(&config);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let mut registry = ToolRegistry::new();
+        bootstrap.register_web_tools(&mut registry, &provider, std::path::Path::new("/tmp"));
+
+        let advertised: Vec<String> = registry.to_tool_defs().into_iter().map(|def| def.name).collect();
+        assert!(!advertised.contains(&"WebSearch".to_string()), "got {advertised:?}");
+    }
+
+    // --- TC-3.1-01 / TC-3.1-02: download directory path construction ---
+
+    #[test]
+    fn web_download_dir_is_built_from_path_components() {
+        let workspace = std::path::Path::new("/tmp/project");
+        let dir = super::web_download_dir(workspace);
+
+        assert!(dir.starts_with(workspace), "downloads must stay inside the workspace");
+        let tail: Vec<_> = dir
+            .strip_prefix(workspace)
+            .expect("under workspace")
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            tail,
+            vec![".agentrs".to_string(), "webfetch".to_string()],
+            "the path must be assembled from components, not a hardcoded separator"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn web_download_dir_uses_backslashes_on_windows() {
+        let dir = super::web_download_dir(std::path::Path::new("C:\\work"));
+        assert!(dir.to_string_lossy().contains("\\.agentrs\\webfetch"), "got {dir:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn web_download_dir_uses_slashes_on_unix() {
+        let dir = super::web_download_dir(std::path::Path::new("/work"));
+        assert_eq!(dir.to_string_lossy(), "/work/.agentrs/webfetch");
     }
 }

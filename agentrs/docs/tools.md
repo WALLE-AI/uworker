@@ -11,6 +11,8 @@ The agent includes a core local tool suite and agent-level helpers. The LLM auto
 | **Grep** | Regex search file contents (via ripgrep) | Yes |
 | **Glob** | Find files by pattern matching | Yes |
 | **ViewImage** | Load a local JPEG, PNG, GIF, or WebP image for model inspection | Yes |
+| **WebFetch** | Fetch a URL, convert it to Markdown, and answer a prompt about it | Yes |
+| **WebSearch** | Search the web through a configured provider | Yes |
 | **Spawn** | Spawn sub-agents for parallel tasks | No |
 | **ToolSearch** | Load schemas for deferred tools | Yes |
 
@@ -70,6 +72,74 @@ Load a supported local image and attach it to the next model turn.
 - Supports JPEG, PNG, GIF, and WebP files up to 20 MB
 - Validates that the file content matches its extension
 
+## WebFetch
+
+Fetch a URL, reduce the page to Markdown, and answer a prompt about its contents.
+
+- Requires `url` and `prompt`; `http` is upgraded to `https` for public hosts
+- HTML is converted to Markdown; other content types are passed through unchanged
+- Cross-host redirects are **not** followed — the tool reports the target so the
+  model can re-issue the call, which re-runs the host policy on the new URL
+- Binary payloads (PDF, images, archives) are saved under `.agentrs/webfetch/`
+  and noted in the result
+- Responses are cached per URL for 15 minutes by default
+- When a summarization model is available the page is reduced through it;
+  otherwise the truncated page text is returned fenced in
+  `<untrusted-page-content source="...">`, because nothing reviewed it
+- Pages outside `preapproved_domains` are summarized under a quoting limit;
+  preapproved documentation is summarized without one so code samples survive
+
+**Refused destinations.** Loopback, link-local (including the cloud metadata
+address `169.254.169.254`), RFC1918, and unique-local addresses are rejected,
+as are `localhost`, `*.local`, and `*.internal`. Hostnames are re-checked after
+DNS resolution, so a public name whose record points inward is refused too. Set
+`web.allow_private_network = true` to permit them.
+
+**Preapproved hosts.** `web.preapproved_domains` entries skip the summarizer, so
+their matching is deliberately stricter than the deny/allow rules:
+
+| Rule | Matches |
+|------|---------|
+| `docs.rs` | that host exactly — **not** `a.docs.rs` |
+| `*.rust-lang.org` | the host and its subdomains |
+| `github.com/anthropics` | that path and everything under it, on segment boundaries |
+
+A bare rule does not cover subdomains: one attacker-controlled subdomain of a
+trusted site would otherwise inherit permission to put raw text into the
+transcript.
+
+**Permissions.** Beyond a bare `WebFetch` entry, the allow list accepts
+`WebFetch:domain:example.com`, which approves that host and its subdomains only.
+
+Registration is skipped entirely when `web.enabled = false`.
+
+## WebSearch
+
+Search the web through a configured provider and return titles and URLs.
+
+- Takes `query` (2 characters or more), plus optionally `allowed_domains` or
+  `blocked_domains` — the two are mutually exclusive
+- Backends, set via `web.search.backend`:
+
+  | Backend | Credential | Notes |
+  |---------|-----------|-------|
+  | `duckduckgo` | none | Works immediately. **Scrapes a human-facing HTML page** — the markup can change without notice, and automated access is not something DuckDuckGo's terms invite. Use it to try things out; prefer another backend for anything you depend on. When the page cannot be parsed the tool reports an error rather than "no results", so a broken scraper is never mistaken for an empty web. |
+  | `brave` | API key via `api_key_env` | Supported API |
+  | `tavily` | API key via `api_key_env` | Supported API; filters domains server-side |
+  | `searxng` | none, but you set `base_url` | An instance you host |
+
+- Providers that support domain filtering receive it directly; the rest are
+  filtered locally
+- The tool description states the current month and year, so date-sensitive
+  queries are not anchored to the model's training cutoff
+- The tool is **not registered** when no backend is configured, or when the
+  configured backend's API key is missing — the model never sees a tool it
+  cannot use
+
+Search is provider-neutral by design: it calls a search API over HTTP rather
+than relying on any LLM vendor's server-side search tool, so it behaves the same
+across Anthropic, OpenAI, Bedrock, and Vertex.
+
 ## Spawn
 
 See [Sub-Agent Spawning](advanced.md#sub-agent-spawning) in the Advanced Features guide.
@@ -96,9 +166,10 @@ User input → Build request (system prompt + history + tool definitions)
            → Output final reply → save session
 ```
 
-- Concurrent-safe tools (Read, Grep, Glob, ViewImage) execute in parallel
+- Concurrent-safe tools (Read, Grep, Glob, ViewImage, WebFetch, WebSearch) execute in parallel
 - Non-concurrent tools (Write, Edit, ExecCommand) execute sequentially
 - Tool output is auto-truncated to prevent context window overflow
+- Network tools observe a per-turn cancellation token, so an interrupted turn does not wait out a request timeout
 - Tool output can be compacted (see [Output Compaction](advanced.md#output-compaction))
 
 ## Tool Descriptions

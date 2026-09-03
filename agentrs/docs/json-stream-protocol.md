@@ -118,7 +118,7 @@ Agent wants to invoke a tool and needs client approval. Agent PAUSES execution u
 |-------|------|-------------|
 | `call_id` | string | Unique ID for this tool invocation |
 | `tool.name` | string | Tool name: `Read`, `Write`, `Edit`, `ExecCommand`, `Glob`, `Grep`, `Spawn`, or MCP tool name |
-| `tool.category` | string | `"info"` (read-only), `"edit"` (file mutation), `"exec"` (shell), `"mcp"` (MCP tool) |
+| `tool.category` | string | `"info"` (read-only), `"edit"` (file mutation), `"exec"` (shell), `"network"` (outbound HTTP), `"mcp"` (MCP tool) |
 | `tool.args` | object | Tool arguments |
 | `tool.description` | string | Human-readable one-line description |
 

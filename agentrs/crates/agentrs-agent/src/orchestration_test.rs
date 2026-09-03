@@ -1,4 +1,5 @@
 use super::*;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 mod tests {
@@ -250,6 +251,7 @@ mod tests {
             agentrs_compact::CompactLevel::Off,
             false,
             10_000,
+            &CancellationToken::new(),
         )
         .await;
         assert!(follow_up_blocks.is_empty());
@@ -279,6 +281,7 @@ mod tests {
             agentrs_compact::CompactLevel::Off,
             false,
             10_000,
+            &CancellationToken::new(),
         )
         .await;
         assert!(follow_up_blocks.is_empty());
@@ -307,6 +310,7 @@ mod tests {
             agentrs_compact::CompactLevel::Off,
             false,
             10_000,
+            &CancellationToken::new(),
         )
         .await;
         assert!(follow_up_blocks.is_empty());
@@ -334,6 +338,7 @@ mod tests {
             agentrs_compact::CompactLevel::Off,
             false,
             10_000,
+            &CancellationToken::new(),
         )
         .await;
         assert!(follow_up_blocks.is_empty());
@@ -344,5 +349,82 @@ mod tests {
         } else {
             panic!("expected ToolResult");
         }
+    }
+}
+
+// --- A gated-off tool must explain itself, not just vanish ---
+
+#[test]
+fn unknown_tool_message_is_bare_for_an_unrecognized_name() {
+    let registry = ToolRegistry::new();
+
+    let message = super::unknown_tool_message(&registry, "Nonsense");
+
+    assert_eq!(
+        message, "Unknown tool: Nonsense",
+        "a genuine typo gets no misleading configuration advice"
+    );
+}
+
+#[test]
+fn a_missing_web_search_says_which_setting_turns_it_on() {
+    // WebFetch present, WebSearch absent: the backend was never configured.
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(NamedStubTool("WebFetch")));
+
+    let message = super::unknown_tool_message(&registry, "WebSearch");
+
+    assert!(message.starts_with("Unknown tool: WebSearch"), "got: {message}");
+    assert!(message.contains("[web.search]"), "got: {message}");
+    assert!(message.contains("brave"), "the valid choices must be named: {message}");
+    assert!(message.contains("api_key_env"), "got: {message}");
+}
+
+#[test]
+fn both_web_tools_missing_points_at_the_enable_switch_instead() {
+    let registry = ToolRegistry::new();
+
+    for name in ["WebFetch", "WebSearch"] {
+        let message = super::unknown_tool_message(&registry, name);
+        assert!(
+            message.contains("`enabled = true`") && message.contains("[web]"),
+            "{name} got: {message}"
+        );
+        assert!(
+            !message.contains("[web.search]"),
+            "naming the backend would misdiagnose a wholesale disable: {message}"
+        );
+    }
+}
+
+struct NamedStubTool(&'static str);
+
+#[async_trait::async_trait]
+impl agentrs_tools::Tool for NamedStubTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        "stub"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> agentrs_types::tool::ToolResult {
+        agentrs_types::tool::ToolResult {
+            content: String::new(),
+            is_error: false,
+        }
+    }
+
+    fn category(&self) -> agentrs_protocol::events::ToolCategory {
+        agentrs_protocol::events::ToolCategory::Network
     }
 }

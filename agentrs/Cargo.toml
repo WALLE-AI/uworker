@@ -39,8 +39,9 @@ agentrs-agent     = { path = "crates/agentrs-agent" }
 agentrs-tui       = { path = "crates/agentrs-tui" }
 
 # Async runtime
-tokio   = { version = "1", features = ["full"] }
-futures = "0.3"
+tokio      = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures    = "0.3"
 
 # HTTP client
 # HTTP client — use rustls to avoid native OpenSSL dep during cross-compilation
@@ -114,6 +115,12 @@ base64 = "0.22"
 
 # URL parsing
 url = "2"
+
+# HTML to Markdown conversion (Turndown port) for WebFetch
+htmd = "0.5"
+# Shared with htmd, declared directly for the DuckDuckGo result parser
+html5ever = "0.38"
+markup5ever_rcdom = "0.38"
 
 # Structured logging
 tracing = "0.1"

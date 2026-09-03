@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use agentrs_config::hooks::HooksConfig;
 use agentrs_protocol::events::ToolCategory;
@@ -57,13 +58,23 @@ pub trait Tool: Send + Sync {
     /// Execute the tool
     async fn execute(&self, input: Value) -> ToolResult;
 
+    /// Execute the tool with cooperative cancellation.
+    ///
+    /// Long-running tools that block on the network override this so an
+    /// interrupted turn does not have to wait out the full request timeout.
+    /// The default ignores the token, keeping every existing tool unchanged.
+    async fn execute_cancellable(&self, input: Value, _cancel: CancellationToken) -> ToolResult {
+        self.execute(input).await
+    }
+
     /// Execute the tool and optionally provide content for the next model turn.
     ///
+    /// This is the single execution entry point the orchestration layer calls.
     /// The default preserves the existing text-only tool contract. Multimodal
     /// loaders override this method so their binary payload never travels in
     /// the textual tool-result channel.
-    async fn execute_with_follow_up(&self, input: Value) -> ToolExecutionOutput {
-        self.execute(input).await.into()
+    async fn execute_with_follow_up(&self, input: Value, cancel: CancellationToken) -> ToolExecutionOutput {
+        self.execute_cancellable(input, cancel).await.into()
     }
 
     /// Whether advertising and executing this tool requires image-input

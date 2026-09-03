@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use agentrs_protocol::events::ToolCategory;
 use agentrs_types::message::{ContentBlock, ImageUrl, extension_to_image_media_type};
@@ -141,7 +142,7 @@ impl Tool for ViewImageTool {
         }
     }
 
-    async fn execute_with_follow_up(&self, input: Value) -> ToolExecutionOutput {
+    async fn execute_with_follow_up(&self, input: Value, _cancel: CancellationToken) -> ToolExecutionOutput {
         let file_path = input.get("file_path").and_then(Value::as_str).unwrap_or("unknown");
         match self.load_image(&input).await {
             Ok(image_url) => ToolExecutionOutput {

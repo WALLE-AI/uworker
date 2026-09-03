@@ -267,3 +267,96 @@ fn tool_def_description_matches_tool_instance() {
         );
     }
 }
+
+// --- TC-3.0-01 through TC-3.0-03: network tool metadata and existing-tool regression ---
+
+use agentrs_config::web::WebConfig;
+use agentrs_protocol::events::ToolCategory;
+use agentrs_tools::view_image::ViewImageTool;
+use agentrs_tools::web::fetch_tool::WebFetchTool;
+
+fn web_fetch_tool() -> (WebFetchTool, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let tool = WebFetchTool::new(&WebConfig::default(), dir.path().to_path_buf(), None).expect("builds");
+    (tool, dir)
+}
+
+/// The web work touched the shared `Tool` trait; these five must be unchanged.
+#[test]
+fn existing_tools_keep_their_categories_and_eager_schemas() {
+    let expectations: Vec<(Box<dyn Tool>, ToolCategory)> = vec![
+        (Box::new(ReadTool::new(None)), ToolCategory::Info),
+        (Box::new(WriteTool::new(None)), ToolCategory::Edit),
+        (Box::new(EditTool::new(None)), ToolCategory::Edit),
+        (Box::new(ExecCommandTool::new(test_cwd())), ToolCategory::Exec),
+        (Box::new(ViewImageTool::new()), ToolCategory::Info),
+    ];
+
+    for (tool, expected) in expectations {
+        assert_eq!(tool.category(), expected, "{} category changed", tool.name());
+        assert!(
+            !tool.is_deferred(),
+            "{} must keep its schema eager; deferring it would change model behaviour",
+            tool.name()
+        );
+    }
+}
+
+#[test]
+fn web_fetch_is_a_deferred_network_tool() {
+    let (tool, _dir) = web_fetch_tool();
+    assert_eq!(tool.name(), "WebFetch");
+    assert_eq!(tool.category(), ToolCategory::Network);
+    assert!(
+        tool.is_deferred(),
+        "a rarely-used tool should not spend tokens every turn"
+    );
+    assert!(tool.is_concurrency_safe(&serde_json::json!({})));
+}
+
+#[test]
+fn web_fetch_description_carries_the_usage_guidance_the_model_needs() {
+    let (tool, _dir) = web_fetch_tool();
+    let desc = tool.description();
+
+    assert!(
+        desc.contains("WILL FAIL for authenticated or private URLs"),
+        "the model must be told not to waste a call on a private URL"
+    );
+    assert!(
+        desc.contains("redirects to a different host") && desc.contains("new WebFetch call"),
+        "the model must know a redirect result means 'call me again with that URL'"
+    );
+    assert!(
+        desc.contains("refused"),
+        "the model must know private destinations are blocked"
+    );
+}
+
+#[test]
+fn web_fetch_schema_is_a_legal_object_schema_with_both_arguments_required() {
+    let (tool, _dir) = web_fetch_tool();
+    let schema = tool.input_schema();
+
+    assert_eq!(schema["type"], "object");
+    let properties = schema["properties"].as_object().expect("properties object");
+    assert!(properties.contains_key("url"));
+    assert!(properties.contains_key("prompt"));
+    let required = schema["required"].as_array().expect("required list");
+    assert_eq!(required.len(), 2, "both arguments are mandatory: {required:?}");
+}
+
+#[test]
+fn registered_web_fetch_propagates_its_deferred_flag_into_the_tool_def() {
+    let (tool, _dir) = web_fetch_tool();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(tool));
+    registry.register(Box::new(ReadTool::new(None)));
+
+    let defs = registry.to_tool_defs();
+    let fetch = defs.iter().find(|def| def.name == "WebFetch").expect("registered");
+    let read = defs.iter().find(|def| def.name == "Read").expect("registered");
+
+    assert!(fetch.deferred);
+    assert!(!read.deferred, "deferral must stay per-tool");
+}

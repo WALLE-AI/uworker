@@ -21,6 +21,9 @@ use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
 use agentrs_tools::tool_search::ToolSearchTool;
 use agentrs_tools::view_image::ViewImageTool;
+use agentrs_tools::web::fetch_tool::WebFetchTool;
+use agentrs_tools::web::search_tool::WebSearchTool;
+use agentrs_tools::web::{BackendError, build_backend};
 use agentrs_tools::write::WriteTool;
 use anyhow::Result;
 use tracing::info;
@@ -34,6 +37,7 @@ use crate::session::Session;
 use crate::skill_tool::SkillTool;
 use crate::spawn_tool::SpawnTool;
 use crate::spawner::AgentSpawner;
+use crate::summarizer::ProviderSummarizer;
 use crate::tool_policy::ToolPolicy;
 
 /// Result of bootstrapping an agent engine with all features initialized.
@@ -356,6 +360,45 @@ impl AgentBootstrap {
             self.tool_policy.clone(),
         );
         registry.register(Box::new(SpawnTool::new(Arc::new(spawner))));
+
+        self.register_web_tools(registry, provider, workspace);
+    }
+
+    /// Register the network tools, when configured.
+    ///
+    /// Both are skipped rather than registered-and-failing when unusable: a
+    /// tool the model can see but never call wastes context on every request.
+    fn register_web_tools(&self, registry: &mut ToolRegistry, provider: &Arc<dyn LlmProvider>, workspace: &Path) {
+        let web = &self.config.web;
+        if !web.enabled {
+            info!(target: "agentrs_agent", "web tools disabled by configuration");
+            return;
+        }
+
+        let summarizer = Arc::new(ProviderSummarizer::new(Arc::clone(provider), self.config.model.clone()));
+        match WebFetchTool::new(web, web_download_dir(workspace), Some(summarizer)) {
+            Ok(tool) => registry.register(Box::new(tool)),
+            Err(error) => tracing::warn!(
+                target: "agentrs_agent",
+                %error,
+                "WebFetch could not be initialized and will not be available"
+            ),
+        }
+
+        match build_backend(web) {
+            Ok(backend) => {
+                info!(target: "agentrs_agent", backend = backend.name(), "WebSearch enabled");
+                registry.register(Box::new(WebSearchTool::new(backend, web.search.max_results)));
+            }
+            Err(BackendError::Disabled) => {
+                info!(target: "agentrs_agent", "WebSearch disabled: no search backend configured");
+            }
+            Err(BackendError::Misconfigured(reason)) => tracing::warn!(
+                target: "agentrs_agent",
+                %reason,
+                "WebSearch is configured but unusable and will not be available"
+            ),
+        }
     }
 
     fn register_plan_tools(&self, registry: &mut ToolRegistry) -> Arc<AtomicBool> {
@@ -401,6 +444,14 @@ impl AgentBootstrap {
         engine.set_prompt_usage(prompt_usage);
         engine
     }
+}
+
+/// Where `WebFetch` saves binary payloads it cannot render as text.
+///
+/// Kept inside the workspace, next to session state, so the files are visible
+/// to the user and removed with the rest of the agent's scratch data.
+fn web_download_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".agentrs").join("webfetch")
 }
 
 #[cfg(test)]

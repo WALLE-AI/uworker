@@ -100,6 +100,8 @@ pub enum ToolCategory {
     Edit,
     Exec,
     Mcp,
+    /// Tools that reach the public network (WebFetch, WebSearch).
+    Network,
 }
 
 impl std::fmt::Display for ToolCategory {
@@ -109,6 +111,7 @@ impl std::fmt::Display for ToolCategory {
             Self::Edit => write!(f, "edit"),
             Self::Exec => write!(f, "exec"),
             Self::Mcp => write!(f, "mcp"),
+            Self::Network => write!(f, "network"),
         }
     }
 }

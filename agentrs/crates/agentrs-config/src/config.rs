@@ -12,6 +12,7 @@ use crate::logging::LoggingConfig;
 use crate::plan::PlanConfig;
 use crate::shell::ShellConfig;
 use crate::tui::TuiConfig;
+use crate::web::WebConfig;
 use agentrs_types::llm::ThinkingConfig;
 
 // ---------------------------------------------------------------------------
@@ -122,6 +123,9 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub tui: TuiConfig,
+
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -313,6 +317,7 @@ pub struct Config {
     pub mcp: McpConfig,
     pub logging: LoggingConfig,
     pub tui: TuiConfig,
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,6 +509,7 @@ impl Config {
             mcp: merged.mcp,
             logging: merged.logging,
             tui: merged.tui,
+            web: merged.web,
         })
     }
 }
@@ -865,6 +871,17 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.shell
     };
 
+    // Web: the project file wins whenever it deviates from the default, the
+    // same all-or-nothing strategy the other single-value sections use. Host
+    // policy in particular must not be half-merged — silently unioning a
+    // project's `allow_domains` with a global one would widen reach in a way
+    // neither file states.
+    let web = if project.web != WebConfig::default() {
+        project.web
+    } else {
+        global.web
+    };
+
     ConfigFile {
         default,
         providers,
@@ -882,6 +899,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         mcp,
         logging,
         tui,
+        web,
     }
 }
 
@@ -1097,8 +1115,50 @@ default = "auto"                 # auto, powershell, pwsh, cmd, bash, zsh, sh, o
 # Tool confirmation settings
 [tools]
 auto_approve = false             # --auto-approve overrides
-# Tools that skip confirmation even when auto_approve = false
+# Tools that skip confirmation even when auto_approve = false.
+# WebFetch also accepts a domain-scoped entry, e.g. "WebFetch:domain:docs.rs",
+# which approves that host and its subdomains only.
 allow_list = ["Read", "Grep", "Glob"]
+
+# Network tools (WebFetch, WebSearch)
+[web]
+enabled = true                   # false unregisters both web tools
+# timeout_secs = 60
+# max_content_bytes = 10485760   # 10 MB, enforced while streaming
+# max_redirects = 10             # same-host hops before giving up
+# max_markdown_chars = 100000    # page text kept before truncation
+# cache_ttl_secs = 900           # per-URL response cache
+
+# Loopback, link-local (incl. the 169.254.169.254 metadata endpoint), RFC1918,
+# and unique-local destinations are refused unless this is on. Enable it only to
+# reach a local dev server or an internal service you control.
+# allow_private_network = false
+# allow_domains = []             # non-empty turns this into a whitelist
+# deny_domains = []              # takes precedence over allow_domains
+
+# Hosts whose markdown is returned verbatim, skipping the summarizer. Matching is
+# strict because this puts unreviewed remote text into the transcript:
+#   "docs.rs"               -> that host only, NOT a.docs.rs
+#   "*.rust-lang.org"       -> the host and its subdomains
+#   "github.com/anthropics" -> that path prefix, on segment boundaries
+# preapproved_domains = []
+
+# WebSearch is only registered once a backend is configured; with backend =
+# "none" the tool does not exist and the model never sees it.
+[web.search]
+# none       -> WebSearch is not registered at all
+# duckduckgo -> no key needed, but it scrapes a human-facing HTML page: the
+#               markup can change without notice and automated access is not
+#               something DuckDuckGo's terms invite. Fine for trying things out;
+#               prefer a supported backend for anything you depend on.
+# brave      -> needs an API key (api_key_env)
+# tavily     -> needs an API key (api_key_env), filters domains server-side
+# searxng    -> no key, but you supply base_url for an instance you host
+backend = "none"                 # none | duckduckgo | brave | tavily | searxng
+# api_key_env = "BRAVE_API_KEY"  # env var holding the backend's key
+# base_url = ""                  # required for searxng; overrides the endpoint otherwise
+# max_results = 10
+# timeout_secs = 30
 
 # Context compaction settings
 # [compact]

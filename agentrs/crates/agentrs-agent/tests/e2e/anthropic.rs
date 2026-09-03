@@ -52,6 +52,7 @@ fn anthropic_config(api_key: &str) -> Config {
         mcp: McpConfig::default(),
         logging: agentrs_config::logging::LoggingConfig::default(),
         tui: agentrs_config::tui::TuiConfig::default(),
+        web: agentrs_config::web::WebConfig::default(),
     }
 }
 

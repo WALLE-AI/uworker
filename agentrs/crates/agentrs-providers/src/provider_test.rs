@@ -15,6 +15,7 @@ mod tests {
     use agentrs_config::plan::PlanConfig;
     use agentrs_config::shell::ShellConfig;
     use agentrs_config::tui::TuiConfig;
+    use agentrs_config::web::WebConfig;
 
     use super::create_provider;
 
@@ -96,6 +97,7 @@ mod tests {
             mcp: McpConfig::default(),
             logging: LoggingConfig::default(),
             tui: TuiConfig::default(),
+            web: WebConfig::default(),
         }
     }
 

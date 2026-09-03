@@ -33,6 +33,7 @@ fn minimal_config() -> Config {
         mcp: Default::default(),
         logging: Default::default(),
         tui: agentrs_config::tui::TuiConfig::default(),
+        web: agentrs_config::web::WebConfig::default(),
     }
 }
 

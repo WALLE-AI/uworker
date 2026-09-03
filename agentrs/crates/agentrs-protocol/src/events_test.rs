@@ -125,12 +125,33 @@ mod tests {
         assert!(json["usage"].get("cache_write_tokens").is_none());
     }
 
+    // --- TC-0.1-01 / TC-0.1-02: category wire names ---
     #[test]
     fn test_tool_category_display() {
         assert_eq!(ToolCategory::Info.to_string(), "info");
         assert_eq!(ToolCategory::Edit.to_string(), "edit");
         assert_eq!(ToolCategory::Exec.to_string(), "exec");
         assert_eq!(ToolCategory::Mcp.to_string(), "mcp");
+        assert_eq!(ToolCategory::Network.to_string(), "network");
+    }
+
+    #[test]
+    fn test_tool_category_serializes_as_snake_case() {
+        for (category, expected) in [
+            (ToolCategory::Info, "info"),
+            (ToolCategory::Edit, "edit"),
+            (ToolCategory::Exec, "exec"),
+            (ToolCategory::Mcp, "mcp"),
+            (ToolCategory::Network, "network"),
+        ] {
+            let json = serde_json::to_value(category).unwrap();
+            assert_eq!(json, serde_json::Value::String(expected.to_string()));
+            assert_eq!(
+                category.to_string(),
+                expected,
+                "Display and serde must agree so protocol consumers see one name"
+            );
+        }
     }
 
     #[test]

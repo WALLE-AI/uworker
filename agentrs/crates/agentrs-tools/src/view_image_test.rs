@@ -4,6 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 use agentrs_types::message::ContentBlock;
 
@@ -20,7 +21,9 @@ async fn returns_image_as_follow_up_block() {
     fs::write(&path, png).expect("write image fixture");
     let tool = ViewImageTool::new();
 
-    let output = tool.execute_with_follow_up(json!({ "file_path": path })).await;
+    let output = tool
+        .execute_with_follow_up(json!({ "file_path": path }), CancellationToken::new())
+        .await;
 
     assert!(!output.result.is_error);
     assert_eq!(output.follow_up_blocks.len(), 1);
@@ -38,7 +41,9 @@ async fn rejects_file_with_image_extension_but_invalid_content() {
     fs::write(&path, b"fake-png").expect("write invalid image fixture");
     let tool = ViewImageTool::new();
 
-    let output = tool.execute_with_follow_up(json!({ "file_path": path })).await;
+    let output = tool
+        .execute_with_follow_up(json!({ "file_path": path }), CancellationToken::new())
+        .await;
 
     assert!(output.result.is_error);
     assert!(output.result.content.contains("File content is not a supported"));
@@ -52,7 +57,9 @@ async fn rejects_image_content_that_does_not_match_extension() {
     fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write mismatched image fixture");
     let tool = ViewImageTool::new();
 
-    let output = tool.execute_with_follow_up(json!({ "file_path": path })).await;
+    let output = tool
+        .execute_with_follow_up(json!({ "file_path": path }), CancellationToken::new())
+        .await;
 
     assert!(output.result.is_error);
     assert!(output.result.content.contains("does not match extension type"));
@@ -64,7 +71,7 @@ async fn rejects_relative_paths_without_follow_up() {
     let tool = ViewImageTool::new();
 
     let output = tool
-        .execute_with_follow_up(json!({ "file_path": "relative.png" }))
+        .execute_with_follow_up(json!({ "file_path": "relative.png" }), CancellationToken::new())
         .await;
 
     assert!(output.result.is_error);
@@ -79,7 +86,9 @@ async fn rejects_unsupported_image_extensions() {
     fs::write(&path, b"<svg/>").expect("write image fixture");
     let tool = ViewImageTool::new();
 
-    let output = tool.execute_with_follow_up(json!({ "file_path": path })).await;
+    let output = tool
+        .execute_with_follow_up(json!({ "file_path": path }), CancellationToken::new())
+        .await;
 
     assert!(output.result.is_error);
     assert!(output.result.content.contains("Unsupported image extension"));
