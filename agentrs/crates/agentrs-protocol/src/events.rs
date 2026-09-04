@@ -70,7 +70,27 @@ pub enum ProtocolEvent {
         name: String,
         tools: Vec<String>,
     },
+    /// The agent's task checklist changed. Carries the whole list, matching the
+    /// tool's replace-only semantics: a host renders this snapshot and discards
+    /// whatever it held before.
+    TodoUpdated {
+        todos: Vec<TodoSnapshot>,
+    },
     Pong,
+}
+
+/// One checklist entry as it crosses the protocol boundary.
+///
+/// Deliberately a separate type from the tool's own item: this is the host
+/// contract, and it must not move whenever the tool's internals do. `status` is
+/// a plain string for the same reason — a host that meets an unfamiliar value
+/// should be able to display it rather than fail to parse the frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TodoSnapshot {
+    pub content: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

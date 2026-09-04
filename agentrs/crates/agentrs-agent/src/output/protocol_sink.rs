@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use agentrs_config::compat::ProviderCompat;
-use agentrs_protocol::events::{Capabilities, ErrorInfo, ProtocolEvent, Usage};
+use agentrs_protocol::events::{Capabilities, ErrorInfo, ProtocolEvent, TodoSnapshot, Usage};
 use agentrs_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 use super::OutputSink;
@@ -135,5 +135,9 @@ impl OutputSink for ProtocolSink {
             msg_id: String::new(),
             message: msg.to_string(),
         });
+    }
+
+    fn emit_todo_update(&self, todos: &[TodoSnapshot]) {
+        let _ = self.writer.emit(&ProtocolEvent::TodoUpdated { todos: todos.to_vec() });
     }
 }

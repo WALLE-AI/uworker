@@ -83,6 +83,7 @@ mod tests_set_config {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
@@ -567,6 +568,7 @@ mod tests_phase6 {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
@@ -856,6 +858,7 @@ mod tests_compact {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
@@ -1065,6 +1068,7 @@ mod tests_compact {
             cwd: "/tmp".into(),
             total_usage: TokenUsage::default(),
             context_state,
+            todos: Vec::new(),
             messages: Vec::new(),
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(NullProvider);
@@ -1647,6 +1651,7 @@ mod tests_plan_mode {
             toon_enabled: false,
             plan_state: PlanState::default(),
             plan_active_flag: Some(flag),
+            todo: None,
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
@@ -1871,6 +1876,7 @@ mod tests_handle_command {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: CacheBreakDetector::new(),
             commands: default_registry(),
         }
@@ -2900,6 +2906,7 @@ mod tests_tool_policy_enforcement {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: CacheBreakDetector::new(),
             commands: default_registry(),
         }
@@ -2965,5 +2972,386 @@ mod tests_tool_policy_enforcement {
         ));
         assert!(!output.all_tool_results_error);
         assert!(output.tool_call_failure_fingerprint.is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Todo checklist integration — engine wiring for TodoWrite
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests_todo {
+    use std::sync::{Arc, Mutex};
+
+    use agentrs_protocol::events::TodoSnapshot;
+    use agentrs_providers::error::ProviderError;
+    use agentrs_providers::provider::LlmProvider;
+    use agentrs_tools::registry::ToolRegistry;
+    use agentrs_tools::todo::{TodoItem, TodoStatus, TodoStore};
+    use agentrs_types::llm::{LlmEvent, LlmRequest};
+    use agentrs_types::message::{ContentBlock, Message, Role};
+    use serde_json::json;
+
+    use super::{CompactLevel, ProviderCompat};
+    use crate::compact::state::CompactState;
+    use crate::confirm::ToolConfirmer;
+    use crate::engine::AgentEngine;
+    use crate::output::OutputSink;
+    use crate::plan::state::PlanState;
+    use crate::todo_reminder::TodoRuntime;
+    use crate::turn::TurnKind;
+
+    const REMINDER_TURNS: usize = 10;
+
+    /// Records checklist publications so the emit path can be asserted on.
+    #[derive(Default)]
+    struct RecordingOutput {
+        todo_updates: Mutex<Vec<Vec<TodoSnapshot>>>,
+    }
+
+    impl OutputSink for RecordingOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+        fn emit_error(&self, _: &str) {}
+        fn emit_info(&self, _: &str) {}
+        fn emit_todo_update(&self, todos: &[TodoSnapshot]) {
+            self.todo_updates.lock().expect("lock").push(todos.to_vec());
+        }
+    }
+
+    struct NullProvider;
+    #[async_trait::async_trait]
+    impl LlmProvider for NullProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    fn make_engine() -> AgentEngine {
+        make_engine_with_output(Arc::new(RecordingOutput::default()))
+    }
+
+    fn make_engine_with_output(output: Arc<dyn OutputSink>) -> AgentEngine {
+        AgentEngine {
+            provider: Arc::new(NullProvider),
+            model: "test-model".to_string(),
+            max_tokens: Some(4096),
+            thinking: None,
+            compat: ProviderCompat::anthropic_defaults(),
+            system_prompt: String::new(),
+            reasoning_effort: None,
+            messages: vec![],
+            total_usage: Default::default(),
+            msg_id: String::new(),
+            pending_turn_id: None,
+            current_turn_id: None,
+            max_turns_per_run: Some(10),
+            max_tool_call_malformed_turns: 3,
+            max_tool_call_failure_turns: 3,
+            tools: ToolRegistry::new(),
+            tool_policy: Default::default(),
+            confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, Vec::new()))),
+            allow_list: Vec::new(),
+            hooks: None,
+            turn_cancel: tokio_util::sync::CancellationToken::new(),
+            session_manager: None,
+            current_session: None,
+            output,
+            approval_manager: None,
+            protocol_writer: None,
+            compact_config: agentrs_config::compact::CompactConfig::default(),
+            compact_context_window_source: agentrs_config::config::CompactContextWindowSource::Default,
+            compact_state: CompactState::new(),
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
+            compact_level: CompactLevel::default(),
+            toon_enabled: false,
+            plan_state: PlanState::default(),
+            plan_active_flag: None,
+            todo: None,
+            cache_detector: super::CacheBreakDetector::new(),
+            commands: crate::commands::default_registry(),
+        }
+    }
+
+    fn engine_with_todo(reminder_turns: usize) -> (AgentEngine, Arc<TodoStore>) {
+        let mut engine = make_engine();
+        let store = Arc::new(TodoStore::new());
+        engine.set_todo_runtime(TodoRuntime::new(Arc::clone(&store), reminder_turns));
+        (engine, store)
+    }
+
+    fn other_call() -> Vec<ContentBlock> {
+        vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "Read".to_string(),
+            input: json!({ "file_path": "/tmp/x" }),
+            extra: None,
+        }]
+    }
+
+    fn is_reminder(message: &Message) -> bool {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("<system-reminder>")))
+    }
+
+    #[test]
+    fn reminder_rides_on_the_request_without_entering_history() {
+        let (mut engine, _store) = engine_with_todo(REMINDER_TURNS);
+        engine.messages.push(Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "do the thing".to_string(),
+            }],
+        ));
+        let history_before = engine.messages.len();
+
+        for _ in 0..REMINDER_TURNS {
+            if let Some(todo) = engine.todo.as_mut() {
+                todo.record_turn(&other_call());
+            }
+        }
+
+        let request = engine.build_request(TurnKind::Normal);
+
+        assert!(
+            request.messages.iter().any(is_reminder),
+            "the reminder must reach the provider"
+        );
+        assert_eq!(
+            engine.messages.len(),
+            history_before,
+            "the reminder must not be appended to history"
+        );
+        assert!(
+            !engine.messages.iter().any(is_reminder),
+            "no reminder text may survive in the session history"
+        );
+    }
+
+    #[test]
+    fn no_reminder_before_the_threshold() {
+        let (mut engine, _store) = engine_with_todo(REMINDER_TURNS);
+        for _ in 0..REMINDER_TURNS - 1 {
+            if let Some(todo) = engine.todo.as_mut() {
+                todo.record_turn(&other_call());
+            }
+        }
+
+        let request = engine.build_request(TurnKind::Normal);
+        assert!(!request.messages.iter().any(is_reminder));
+    }
+
+    #[test]
+    fn a_disabled_checklist_never_reminds() {
+        let (mut engine, _store) = engine_with_todo(0);
+        for _ in 0..50 {
+            if let Some(todo) = engine.todo.as_mut() {
+                todo.record_turn(&other_call());
+            }
+        }
+
+        let request = engine.build_request(TurnKind::Normal);
+        assert!(!request.messages.iter().any(is_reminder));
+    }
+
+    #[test]
+    fn an_engine_without_a_checklist_builds_requests_unchanged() {
+        let mut engine = make_engine();
+        assert!(engine.todo.is_none());
+        let request = engine.build_request(TurnKind::Normal);
+        assert!(!request.messages.iter().any(is_reminder));
+    }
+
+    #[test]
+    fn attaching_the_runtime_rebuilds_the_list_from_history() {
+        let mut engine = make_engine();
+        engine.messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "TodoWrite".to_string(),
+                    input: json!({ "todos": [{ "content": "Resumed task", "status": "in_progress" }] }),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let store = Arc::new(TodoStore::new());
+        engine.set_todo_runtime(TodoRuntime::new(Arc::clone(&store), REMINDER_TURNS));
+
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.len(), 1, "resume must restore the checklist");
+        assert_eq!(snapshot[0].content, "Resumed task");
+        assert_eq!(snapshot[0].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn repeated_todo_writes_do_not_trip_the_tool_loop_guards() {
+        // The loop breakers fingerprint only calls whose result came back as an
+        // error, so a model cycling correctly through its checklist is invisible
+        // to them. This pins that down: without it, a working agent that updates
+        // its list every round would be accused of looping.
+        use crate::tool_call::tool_call_failure_fingerprint;
+        use crate::turn::{TurnGuardAction, TurnGuards};
+
+        let mut guards = TurnGuards::new(Some(100), 3, 3);
+        let todo_call = vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "TodoWrite".to_string(),
+            input: json!({ "todos": [{ "content": "A", "status": "in_progress" }] }),
+            extra: None,
+        }];
+
+        for round in 0..5 {
+            // A successful round contributes no failed calls, hence no fingerprint.
+            let fingerprint = tool_call_failure_fingerprint(&[]);
+            assert!(fingerprint.is_none());
+            let action = guards.after_tool_round(None, fingerprint, false);
+            assert!(
+                matches!(action, TurnGuardAction::Continue),
+                "round {round} should not warn or finalize"
+            );
+        }
+
+        // Sanity: the guards do still react when calls actually fail.
+        let failing = tool_call_failure_fingerprint(&todo_call);
+        assert!(failing.is_some(), "a failed call must still be fingerprinted");
+    }
+
+    fn recorder() -> (AgentEngine, Arc<RecordingOutput>, Arc<TodoStore>) {
+        let output = Arc::new(RecordingOutput::default());
+        let mut engine = make_engine_with_output(output.clone());
+        let store = Arc::new(TodoStore::new());
+        engine.set_todo_runtime(TodoRuntime::new(Arc::clone(&store), REMINDER_TURNS));
+        (engine, output, store)
+    }
+
+    fn updates(output: &RecordingOutput) -> Vec<Vec<TodoSnapshot>> {
+        output.todo_updates.lock().expect("lock").clone()
+    }
+
+    #[test]
+    fn a_changed_checklist_is_published_once() {
+        let (mut engine, output, store) = recorder();
+        store.replace(vec![TodoItem {
+            content: "Wire the store".to_string(),
+            status: TodoStatus::InProgress,
+            active_form: Some("Wiring the store".to_string()),
+        }]);
+
+        engine.publish_todo_update();
+        engine.publish_todo_update();
+
+        let published = updates(&output);
+        assert_eq!(published.len(), 1, "an unchanged list must not re-publish");
+        assert_eq!(published[0][0].content, "Wire the store");
+        assert_eq!(published[0][0].status, "in_progress");
+        assert_eq!(published[0][0].active_form.as_deref(), Some("Wiring the store"));
+    }
+
+    #[test]
+    fn a_session_that_never_uses_the_checklist_publishes_nothing() {
+        let (mut engine, output, _store) = recorder();
+        engine.publish_todo_update();
+        assert!(updates(&output).is_empty());
+    }
+
+    #[test]
+    fn clearing_the_checklist_publishes_the_empty_list() {
+        let (mut engine, output, store) = recorder();
+        store.replace(vec![TodoItem {
+            content: "A".to_string(),
+            status: TodoStatus::Completed,
+            active_form: None,
+        }]);
+        engine.publish_todo_update();
+        store.clear();
+        engine.publish_todo_update();
+
+        let published = updates(&output);
+        assert_eq!(published.len(), 2);
+        assert!(published[1].is_empty(), "the view must be told the list is gone");
+    }
+
+    #[test]
+    fn attaching_a_restored_runtime_repaints_the_checklist() {
+        let output = Arc::new(RecordingOutput::default());
+        let mut engine = make_engine_with_output(output.clone());
+        engine.messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "TodoWrite".to_string(),
+                    input: json!({ "todos": [{ "content": "Resumed task", "status": "pending" }] }),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        engine.set_todo_runtime(TodoRuntime::new(Arc::new(TodoStore::new()), REMINDER_TURNS));
+
+        let published = updates(&output);
+        assert_eq!(published.len(), 1, "a resumed session must repaint what it restored");
+        assert_eq!(published[0][0].content, "Resumed task");
+    }
+
+    #[test]
+    fn the_checklist_stays_available_in_plan_mode() {
+        let mut engine = make_engine();
+        let store = Arc::new(TodoStore::new());
+        engine
+            .tools
+            .register(Box::new(agentrs_tools::todo::TodoWriteTool::new(store, false)));
+        engine.plan_state.is_active = true;
+
+        let advertised: Vec<_> = engine
+            .tool_definitions_for_turn(TurnKind::Normal)
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+
+        assert!(
+            advertised.contains(&"TodoWrite".to_string()),
+            "planning is exactly when a checklist earns its keep: {advertised:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_checklist_is_retired_on_the_next_user_turn() {
+        let (engine, store) = engine_with_todo(REMINDER_TURNS);
+        store.replace(vec![TodoItem {
+            content: "Done".to_string(),
+            status: TodoStatus::Completed,
+            active_form: None,
+        }]);
+
+        engine.todo.as_ref().expect("runtime attached").on_user_turn_start();
+        assert!(store.is_empty());
     }
 }

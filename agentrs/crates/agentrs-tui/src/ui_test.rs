@@ -1,4 +1,5 @@
 use agentrs_agent::commands::CommandSpec;
+use agentrs_protocol::events::TodoSnapshot;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
@@ -1329,4 +1330,123 @@ fn a_flush_ending_in_a_collapsed_summary_adds_no_trailing_blank() {
         lines.get(summary + 1).is_none_or(|line| !line.trim().is_empty()),
         "lines: {lines:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task checklist panel
+// ---------------------------------------------------------------------------
+
+fn todo(content: &str, status: &str, active_form: Option<&str>) -> TodoSnapshot {
+    TodoSnapshot {
+        content: content.to_string(),
+        status: status.to_string(),
+        active_form: active_form.map(str::to_string),
+    }
+}
+
+fn render_with_todos(todos: Vec<TodoSnapshot>, busy: bool) -> String {
+    let mut state = AppState::new(
+        "model".to_string(),
+        "provider".to_string(),
+        "/workspace".to_string(),
+        true,
+    );
+    state.handle_agent_event(AgentEvent::TodoUpdated(todos));
+    state.busy = busy;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+    terminal
+        .draw(|frame| render(frame, &state))
+        .expect("render should succeed");
+    terminal.backend().to_string()
+}
+
+#[test]
+fn the_panel_shows_each_task_with_a_progress_count() {
+    let rendered = render_with_todos(
+        vec![
+            todo("Read the plan", "completed", None),
+            todo("Wire the store", "in_progress", Some("Wiring the store")),
+            todo("Add tests", "pending", None),
+        ],
+        false,
+    );
+
+    assert!(rendered.contains("Tasks 1/3"), "got:\n{rendered}");
+    assert!(rendered.contains("Read the plan"), "got:\n{rendered}");
+    assert!(rendered.contains("Add tests"), "got:\n{rendered}");
+}
+
+#[test]
+fn the_active_task_renders_its_present_continuous_form() {
+    let rendered = render_with_todos(
+        vec![todo("Wire the store", "in_progress", Some("Wiring the store"))],
+        false,
+    );
+
+    assert!(rendered.contains("Wiring the store"), "got:\n{rendered}");
+}
+
+#[test]
+fn a_pending_task_keeps_the_imperative_it_was_planned_in() {
+    let rendered = render_with_todos(vec![todo("Wire the store", "pending", Some("Wiring the store"))], false);
+
+    assert!(rendered.contains("Wire the store"), "got:\n{rendered}");
+    assert!(!rendered.contains("Wiring the store"), "got:\n{rendered}");
+}
+
+#[test]
+fn a_long_checklist_is_elided_rather_than_crowding_the_transcript() {
+    let todos: Vec<_> = (0..10)
+        .map(|index| todo(&format!("Task number {index}"), "pending", None))
+        .collect();
+    let rendered = render_with_todos(todos, false);
+
+    assert!(rendered.contains("Task number 0"), "got:\n{rendered}");
+    assert!(rendered.contains("4 more"), "got:\n{rendered}");
+    assert!(!rendered.contains("Task number 9"), "got:\n{rendered}");
+}
+
+#[test]
+fn no_checklist_means_no_panel_and_no_wasted_row() {
+    let rendered = render_with_todos(Vec::new(), false);
+    assert!(!rendered.contains("Tasks "), "got:\n{rendered}");
+}
+
+#[test]
+fn the_footer_names_the_active_task_while_busy() {
+    let rendered = render_with_todos(
+        vec![todo(
+            "Run the test suite",
+            "in_progress",
+            Some("Running the test suite"),
+        )],
+        true,
+    );
+
+    let footer = rendered
+        .lines()
+        .find(|line| line.contains("AgentrsCLI ·"))
+        .expect("footer should render");
+    assert!(footer.contains("Running the test suite"), "got: {footer}");
+}
+
+#[test]
+fn the_footer_stays_anonymous_when_idle() {
+    let rendered = render_with_todos(
+        vec![todo(
+            "Run the test suite",
+            "in_progress",
+            Some("Running the test suite"),
+        )],
+        false,
+    );
+
+    let footer = rendered
+        .lines()
+        .find(|line| line.contains("AgentrsCLI ·"))
+        .expect("footer should render");
+    assert!(footer.contains("ready"), "got: {footer}");
+    assert!(!footer.contains("Running the test suite"), "got: {footer}");
 }

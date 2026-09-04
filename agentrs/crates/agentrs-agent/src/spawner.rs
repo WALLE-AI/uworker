@@ -11,12 +11,14 @@ use agentrs_tools::glob::GlobTool;
 use agentrs_tools::grep::GrepTool;
 use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
+use agentrs_tools::todo::{TodoStore, TodoWriteTool};
 use agentrs_tools::write::WriteTool;
 use agentrs_types::message::TokenUsage;
 
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::output::null_sink::NullSink;
+use crate::todo_reminder::TodoRuntime;
 use crate::tool_policy::ToolPolicy;
 
 // Re-export from agentrs-types — single source of truth
@@ -73,8 +75,9 @@ impl AgentSpawner {
 
         tracing::info!(target: "agentrs_agent", cwd = %self.cwd.display(), "sub-agent spawned with workspace cwd");
 
+        let reminder_turns = config.todo.reminder_turns;
         let child_policy = effective_child_tool_policy(&self.tool_policy, &[]);
-        let tools = build_tool_registry(&child_policy, &self.cwd, &self.runtime_env);
+        let (tools, todo_store) = build_tool_registry(&child_policy, &config, &self.cwd, &self.runtime_env);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider_and_env(
             self.provider.clone(),
@@ -85,6 +88,9 @@ impl AgentSpawner {
             self.runtime_env.clone(),
         );
         engine.set_tool_policy(child_policy);
+        if let Some(store) = todo_store {
+            engine.set_todo_runtime(TodoRuntime::new(store, reminder_turns));
+        }
 
         match engine.run(&sub_config.prompt, "").await {
             Ok(result) => SubAgentResult {
@@ -156,8 +162,9 @@ impl Spawner for AgentSpawner {
             config.model = model;
         }
 
+        let reminder_turns = config.todo.reminder_turns;
         let child_policy = effective_child_tool_policy(&self.tool_policy, &overrides.allowed_tools);
-        let tools = build_tool_registry(&child_policy, &self.cwd, &self.runtime_env);
+        let (tools, todo_store) = build_tool_registry(&child_policy, &config, &self.cwd, &self.runtime_env);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider_and_env(
             self.provider.clone(),
@@ -169,6 +176,9 @@ impl Spawner for AgentSpawner {
         );
         engine.set_initial_reasoning_effort(overrides.effort.clone());
         engine.set_tool_policy(child_policy);
+        if let Some(store) = todo_store {
+            engine.set_todo_runtime(TodoRuntime::new(store, reminder_turns));
+        }
 
         match engine.run(&sub_config.prompt, "").await {
             Ok(result) => SubAgentResult {
@@ -202,7 +212,17 @@ fn effective_child_tool_policy(parent: &ToolPolicy, allowed_tools: &[String]) ->
     )
 }
 
-fn build_tool_registry(policy: &ToolPolicy, cwd: &Path, runtime_env: &[(String, String)]) -> ToolRegistry {
+/// Assemble a sub-agent's tools, and the checklist store if it gets one.
+///
+/// The store is created here rather than shared with the parent: a sub-agent
+/// runs its own engine, so it plans and tracks its own work without any way to
+/// observe or overwrite the checklist that spawned it.
+fn build_tool_registry(
+    policy: &ToolPolicy,
+    config: &Config,
+    cwd: &Path,
+    runtime_env: &[(String, String)],
+) -> (ToolRegistry, Option<Arc<TodoStore>>) {
     let all_tools: Vec<(&str, Box<dyn agentrs_tools::Tool>)> = vec![
         ("Read", Box::new(ReadTool::new(None))),
         ("Write", Box::new(WriteTool::new(None))),
@@ -221,7 +241,17 @@ fn build_tool_registry(policy: &ToolPolicy, cwd: &Path, runtime_env: &[(String, 
             registry.register(tool);
         }
     }
-    registry
+
+    let todo_store = (config.todo.enabled && policy.allows("TodoWrite")).then(|| {
+        let store = Arc::new(TodoStore::new());
+        registry.register(Box::new(TodoWriteTool::new(
+            Arc::clone(&store),
+            config.todo.allow_parallel_in_progress,
+        )));
+        store
+    });
+
+    (registry, todo_store)
 }
 
 #[cfg(test)]

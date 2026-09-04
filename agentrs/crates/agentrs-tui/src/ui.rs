@@ -13,6 +13,9 @@ const MAX_COMPOSER_HEIGHT: u16 = 8;
 const MAX_POPUP_ITEMS: usize = 7;
 const FOOTER_HEIGHT: u16 = 2;
 const MAX_VISIBLE_TOOLS: usize = 3;
+/// Checklist rows the panel shows before it elides the tail. Sized so a long
+/// plan cannot crowd out the transcript it is describing.
+const MAX_VISIBLE_TODOS: usize = 6;
 const TRANSCRIPT_BOTTOM_GAP: u16 = 1;
 const AGENTRS_MARK_WIDTH: usize = 24;
 /// Upper bound for the approval dialog height. Tool inputs are often
@@ -70,13 +73,18 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &AppState) {
         .composer
         .visual_height(composer_width, MAX_COMPOSER_HEIGHT)
         .saturating_add(1);
-    let reserved_height = composer_height.saturating_add(1).saturating_add(FOOTER_HEIGHT);
+    let todo_height = todo_panel_height(state);
+    let reserved_height = composer_height
+        .saturating_add(1)
+        .saturating_add(FOOTER_HEIGHT)
+        .saturating_add(todo_height);
     let max_transcript_height = content.height.saturating_sub(reserved_height);
     let transcript_height = desired_transcript_height(state, content.width, max_transcript_height);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(transcript_height),
+            Constraint::Length(todo_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
             Constraint::Length(FOOTER_HEIGHT),
@@ -85,14 +93,68 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &AppState) {
         .split(content);
 
     render_transcript(frame, chunks[0], state);
-    render_composer(frame, chunks[1], state);
-    render_footer(frame, chunks[3], state);
+    render_todo_panel(frame, chunks[1], state);
+    render_composer(frame, chunks[2], state);
+    render_footer(frame, chunks[4], state);
 
     if state.approval.is_some() {
         render_approval(frame, content, state);
     } else if state.popup.is_visible(&state.composer.text()) {
-        render_command_popup(frame, content, chunks[1], state);
+        render_command_popup(frame, content, chunks[2], state);
     }
+}
+
+/// Rows the checklist panel needs: a header plus one row per shown entry, or
+/// nothing at all when there is no checklist.
+fn todo_panel_height(state: &AppState) -> u16 {
+    if state.todos.is_empty() {
+        return 0;
+    }
+    let shown = state.todos.len().min(MAX_VISIBLE_TODOS);
+    let elided = usize::from(state.todos.len() > MAX_VISIBLE_TODOS);
+    // header + entries + optional "N more" line
+    (1 + shown + elided).min(u16::MAX as usize) as u16
+}
+
+fn render_todo_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if state.todos.is_empty() || area.height == 0 {
+        return;
+    }
+
+    let done = state.todos.iter().filter(|todo| todo.status == "completed").count();
+    let mut lines = vec![Line::from(Span::styled(
+        format!("  Tasks {}/{}", done, state.todos.len()),
+        muted(state),
+    ))];
+
+    for todo in state.todos.iter().take(MAX_VISIBLE_TODOS) {
+        let (marker, style) = match todo.status.as_str() {
+            "completed" => ("✓", muted(state)),
+            "in_progress" => ("▸", color(state, Color::Cyan)),
+            _ => ("○", normal(state)),
+        };
+        // The active entry is the one the user is waiting on, so it shows its
+        // present-continuous form; the rest stay in the imperative they were
+        // planned in.
+        let label = if todo.status == "in_progress" {
+            todo.active_form.as_deref().unwrap_or(&todo.content)
+        } else {
+            &todo.content
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {marker} "), style),
+            Span::styled(label.to_string(), style),
+        ]));
+    }
+
+    if state.todos.len() > MAX_VISIBLE_TODOS {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more", state.todos.len() - MAX_VISIBLE_TODOS),
+            muted(state),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn compact_cwd(cwd: &str) -> &str {
@@ -593,15 +655,21 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let spinner = ["·", "••", "•••", "••"]
+        .get(state.spinner_frame)
+        .copied()
+        .unwrap_or("·");
     let status = if state.initializing {
-        "starting"
+        "starting".to_string()
     } else if state.busy {
-        ["·", "••", "•••", "••"]
-            .get(state.spinner_frame)
-            .copied()
-            .unwrap_or("·")
+        // Naming the active task turns an anonymous spinner into progress the
+        // user can actually read.
+        match state.active_todo_label() {
+            Some(label) => format!("{spinner} {label}"),
+            None => spinner.to_string(),
+        }
     } else {
-        "ready"
+        "ready".to_string()
     };
     let metadata = format!(
         " AgentrsCLI · {} · {} · {} · {} ",

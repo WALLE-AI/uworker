@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use agentrs_agent::output::OutputSink;
-use agentrs_protocol::events::{ProtocolEvent, ToolStatus};
+use agentrs_protocol::events::{ProtocolEvent, TodoSnapshot, ToolStatus};
 use agentrs_protocol::writer::ProtocolEmitter;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -45,6 +45,7 @@ pub(super) enum AgentEvent {
         name: String,
         reason: String,
     },
+    TodoUpdated(Vec<TodoSnapshot>),
 }
 
 pub(super) struct TuiSink {
@@ -108,6 +109,10 @@ impl OutputSink for TuiSink {
 
     fn emit_info(&self, msg: &str) {
         self.send(AgentEvent::Info(msg.to_string()));
+    }
+
+    fn emit_todo_update(&self, todos: &[TodoSnapshot]) {
+        self.send(AgentEvent::TodoUpdated(todos.to_vec()));
     }
 }
 

@@ -1,4 +1,5 @@
 use agentrs_agent::commands::CommandSpec;
+use agentrs_protocol::events::TodoSnapshot;
 use agentrs_types::compact::{CompactMetadata, CompactTrigger};
 use agentrs_types::message::{ContentBlock, Message, Role};
 
@@ -378,4 +379,114 @@ fn a_second_reasoning_block_finishes_the_answer_before_it() {
 
     assert!(state.transcript[1].is_finished());
     assert!(!state.transcript[2].is_finished());
+}
+
+// ---------------------------------------------------------------------------
+// Task checklist
+// ---------------------------------------------------------------------------
+
+fn todo(content: &str, status: &str, active_form: Option<&str>) -> TodoSnapshot {
+    TodoSnapshot {
+        content: content.to_string(),
+        status: status.to_string(),
+        active_form: active_form.map(str::to_string),
+    }
+}
+
+#[test]
+fn a_checklist_update_replaces_the_previous_list() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![
+        todo("A", "pending", None),
+        todo("B", "pending", None),
+    ]));
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![todo("C", "completed", None)]));
+
+    assert_eq!(state.todos.len(), 1, "the tool replaces, so the view replaces");
+    assert_eq!(state.todos[0].content, "C");
+}
+
+#[test]
+fn an_empty_update_clears_the_checklist() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![todo("A", "pending", None)]));
+    state.handle_agent_event(AgentEvent::TodoUpdated(Vec::new()));
+
+    assert!(state.todos.is_empty());
+}
+
+#[test]
+fn the_status_line_names_the_single_active_task() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![
+        todo("Read the plan", "completed", None),
+        todo("Run the test suite", "in_progress", Some("Running the test suite")),
+        todo("Write docs", "pending", None),
+    ]));
+
+    assert_eq!(state.active_todo_label(), Some("Running the test suite"));
+}
+
+#[test]
+fn the_status_line_falls_back_to_content_without_an_active_form() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![todo(
+        "Run the test suite",
+        "in_progress",
+        None,
+    )]));
+
+    assert_eq!(state.active_todo_label(), Some("Run the test suite"));
+}
+
+#[test]
+fn the_status_line_stays_anonymous_when_several_tasks_are_active() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![
+        todo("A", "in_progress", Some("Doing A")),
+        todo("B", "in_progress", Some("Doing B")),
+    ]));
+
+    assert_eq!(
+        state.active_todo_label(),
+        None,
+        "picking one of several would be arbitrary"
+    );
+}
+
+#[test]
+fn the_status_line_is_anonymous_with_no_active_task() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![todo("A", "pending", None)]));
+    assert_eq!(state.active_todo_label(), None);
+}
+
+#[test]
+fn the_summary_lists_every_entry_with_a_progress_count() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![
+        todo("Read the plan", "completed", None),
+        todo("Run tests", "in_progress", Some("Running tests")),
+        todo("Write docs", "pending", None),
+    ]));
+
+    let summary = state.todo_summary();
+    assert!(summary.starts_with("1/3 completed"), "got: {summary}");
+    assert!(summary.contains("✓ Read the plan"), "got: {summary}");
+    assert!(summary.contains("▸ Run tests"), "got: {summary}");
+    assert!(summary.contains("○ Write docs"), "got: {summary}");
+}
+
+#[test]
+fn the_summary_says_so_when_nothing_is_tracked() {
+    assert_eq!(state().todo_summary(), "No tasks tracked in this session");
+}
+
+#[test]
+fn a_new_session_starts_without_a_checklist() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::TodoUpdated(vec![todo("A", "in_progress", None)]));
+    state.reset_session("m".to_string(), "p".to_string(), None, &[]);
+
+    assert!(state.todos.is_empty(), "a fresh session must not inherit the old plan");
 }

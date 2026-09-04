@@ -55,3 +55,35 @@ fn a_registered_web_fetch_needs_no_hint() {
         "asking about a tool that exists is not a gating problem"
     );
 }
+
+#[test]
+fn a_missing_todo_write_points_at_its_own_switch() {
+    let hint = missing_tool_hint("TodoWrite", registered(&["Read"])).expect("a hint");
+
+    assert!(hint.contains("[todo]"), "got: {hint}");
+    assert!(hint.contains("`enabled = true`"), "got: {hint}");
+    assert!(hint.contains("agentrs config path"), "got: {hint}");
+    assert!(
+        !hint.contains("[web"),
+        "TodoWrite must not inherit the web hints: {hint}"
+    );
+}
+
+// TodoWrite has a single on/off switch, so its answer must not depend on
+// whether the unrelated web tools happen to be registered.
+#[test]
+fn the_todo_write_hint_ignores_which_other_tools_exist() {
+    let alone = missing_tool_hint("TodoWrite", registered(&[])).expect("a hint");
+    let alongside_web = missing_tool_hint("TodoWrite", registered(&["WebFetch", "WebSearch"])).expect("a hint");
+    assert_eq!(alone, alongside_web);
+}
+
+// Adding TodoWrite to the gated list must not change what the web tools report.
+#[test]
+fn todo_write_does_not_disturb_the_web_hints() {
+    let hint = missing_tool_hint("WebFetch", registered(&[])).expect("a hint");
+    assert!(
+        hint.contains("`[web]`"),
+        "an unregistered TodoWrite must not make the web tools look configured: {hint}"
+    );
+}

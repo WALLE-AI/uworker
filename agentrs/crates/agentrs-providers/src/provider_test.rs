@@ -14,6 +14,7 @@ mod tests {
     use agentrs_config::logging::LoggingConfig;
     use agentrs_config::plan::PlanConfig;
     use agentrs_config::shell::ShellConfig;
+    use agentrs_config::todo::TodoConfig;
     use agentrs_config::tui::TuiConfig;
     use agentrs_config::web::WebConfig;
 
@@ -89,6 +90,7 @@ mod tests {
             compact: CompactConfig::default(),
             compact_context_window_source: agentrs_config::config::CompactContextWindowSource::Default,
             plan: PlanConfig::default(),
+            todo: TodoConfig::default(),
             shell: ShellConfig::default(),
             file_cache: FileCacheConfig::default(),
             hooks: HooksConfig::default(),

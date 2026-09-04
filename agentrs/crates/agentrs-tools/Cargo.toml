@@ -1,6 +1,6 @@
 [package]
 name = "agentrs-tools"
-description = "Built-in agent tools for agentrs (Read, Write, Edit, ExecCommand, Grep, Glob, WebFetch, WebSearch)"
+description = "Built-in agent tools for agentrs (Read, Write, Edit, ExecCommand, Grep, Glob, TodoWrite, WebFetch, WebSearch)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -24,6 +24,7 @@ chrono.workspace      = true
 glob.workspace        = true
 lru.workspace         = true
 reqwest.workspace     = true
+thiserror.workspace   = true
 tokio-util.workspace  = true
 url.workspace         = true
 htmd.workspace        = true

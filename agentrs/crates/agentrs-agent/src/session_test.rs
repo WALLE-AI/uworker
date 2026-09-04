@@ -3,6 +3,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentrs_tools::todo::{TodoItem, TodoStatus};
     use agentrs_types::message::{ContentBlock, Message, Role};
     use chrono::Duration;
     use std::fs;
@@ -524,6 +525,57 @@ mod tests {
         assert!(state_json.get("root_id").is_none());
     }
 
+    #[test]
+    fn todos_survive_a_save_and_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+
+        session.todos = vec![
+            TodoItem {
+                content: "Wire the store".to_string(),
+                status: TodoStatus::InProgress,
+                active_form: Some("Wiring the store".to_string()),
+            },
+            TodoItem {
+                content: "Add tests".to_string(),
+                status: TodoStatus::Pending,
+                active_form: None,
+            },
+        ];
+        manager.save(&session).unwrap();
+
+        let loaded = manager.load(&session.id).unwrap();
+        assert_eq!(loaded.todos.len(), 2);
+        assert_eq!(loaded.todos[0].content, "Wire the store");
+        assert_eq!(loaded.todos[0].status, TodoStatus::InProgress);
+        assert_eq!(loaded.todos[0].active_form.as_deref(), Some("Wiring the store"));
+        assert!(loaded.todos[1].active_form.is_none());
+    }
+
+    // The snapshot is a fallback for post-compaction resume, so it must not
+    // add a key to the millions of sessions that never touch the checklist.
+    #[test]
+    fn an_empty_checklist_writes_no_key() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+
+        let state_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(manager.state_path(&session.id)).unwrap()).unwrap();
+        assert!(state_json.get("todos").is_none());
+    }
+
+    #[test]
+    fn a_session_file_predating_the_checklist_still_loads() {
+        let session = sample_session("legacy", "gpt-4");
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("todos");
+
+        let loaded: Session = serde_json::from_value(value).unwrap();
+        assert!(loaded.todos.is_empty());
+    }
+
     fn sample_session(id: &str, model: &str) -> Session {
         Session {
             id: id.to_string(),
@@ -536,6 +588,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             total_usage: TokenUsage::default(),
             context_state: ContextState::default(),
+            todos: Vec::new(),
             messages: vec![Message::new(
                 Role::User,
                 vec![ContentBlock::Text {

@@ -24,6 +24,7 @@ use crate::plan::prompt::plan_mode_instructions;
 use crate::plan::state::PlanState;
 use crate::session::{Session, SessionManager};
 use crate::stream::StreamOutcome;
+use crate::todo_reminder::TodoRuntime;
 use crate::tool_call::{
     DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, ToolCallFailureFingerprint,
     ToolCallMalformedFingerprint, merge_tool_results, tool_call_failure_fingerprint, tool_call_malformed_fingerprint,
@@ -41,6 +42,7 @@ use agentrs_protocol::events::ToolCategory;
 use agentrs_protocol::writer::ProtocolEmitter;
 use agentrs_providers::provider::{LlmProvider, create_provider};
 use agentrs_tools::registry::ToolRegistry;
+use agentrs_tools::todo::to_snapshots;
 use agentrs_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
 use agentrs_types::message::{ContentBlock, ImageInputCapability, Message, Role, StopReason, TokenUsage};
 use agentrs_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
@@ -159,6 +161,9 @@ pub struct AgentEngine {
     /// Shared flag read by EnterPlanMode/ExitPlanMode tools to validate transitions.
     /// Updated by the engine when processing PlanModeTransition modifiers.
     plan_active_flag: Option<Arc<AtomicBool>>,
+    /// Task checklist state: the store TodoWrite writes into plus the
+    /// reminder cadence. `None` when the tool is disabled by configuration.
+    todo: Option<TodoRuntime>,
 
     // Diagnostics and command handling.
     /// Prompt cache break detector for diagnostics.
@@ -249,6 +254,7 @@ impl AgentEngine {
             toon_enabled: config.compact.toon,
             plan_state: PlanState::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: CacheBreakDetector::new(),
             commands: default_registry(),
         };
@@ -349,6 +355,7 @@ impl AgentEngine {
             toon_enabled: config.compact.toon,
             plan_state: PlanState::default(),
             plan_active_flag: None,
+            todo: None,
             cache_detector: CacheBreakDetector::new(),
             commands: default_registry(),
         };
@@ -444,6 +451,22 @@ impl AgentEngine {
     pub fn set_plan_active_flag(&mut self, flag: Arc<AtomicBool>) {
         self.plan_active_flag = Some(flag);
     }
+
+    /// Attach the task checklist shared with the `TodoWrite` tool.
+    ///
+    /// Rebuilds the list immediately so a resumed or forked session starts with
+    /// the checklist that was live when it was left.
+    pub(crate) fn set_todo_runtime(&mut self, runtime: TodoRuntime) {
+        let persisted = self
+            .current_session
+            .as_ref()
+            .map(|session| session.todos.clone())
+            .unwrap_or_default();
+        runtime.rehydrate(&self.messages, &persisted);
+        self.todo = Some(runtime);
+        // A resumed session must repaint the checklist it was left with.
+        self.publish_todo_update();
+    }
 }
 
 impl AgentEngine {
@@ -516,6 +539,10 @@ impl AgentEngine {
 
     async fn run_inner(&mut self, content_blocks: Vec<ContentBlock>, msg_id: &str) -> Result<AgentResult, AgentError> {
         self.reset_turn_cancel();
+        if let Some(todo) = &self.todo {
+            todo.on_user_turn_start();
+        }
+        self.publish_todo_update();
         self.msg_id = msg_id.to_string();
         self.current_turn_id = Some(
             self.pending_turn_id
@@ -552,6 +579,9 @@ impl AgentEngine {
 
             let outcome = self.run_turn(TurnKind::Normal).await?;
             guards.record_counted_turn();
+            if let Some(todo) = self.todo.as_mut() {
+                todo.record_turn(&outcome.tool_calls);
+            }
 
             let tool_calls = match TurnOutcome::from_stream(outcome) {
                 TurnOutcome::ToolRound(outcome) => {
@@ -643,6 +673,7 @@ impl AgentEngine {
             }
 
             self.emit_tool_results(&tool_calls, &tool_results);
+            self.publish_todo_update();
             self.record_tool_context_estimate(&tool_results, &follow_up_blocks);
 
             self.push_history(Role::User, tool_results);
@@ -689,6 +720,12 @@ impl AgentEngine {
                     text: prompt.to_string(),
                 }],
             ));
+        }
+        // Ephemeral by construction: the reminder rides along on this request
+        // only. Writing it back into `self.messages` would persist a nag into
+        // the session file and re-send it on every subsequent turn.
+        if let Some(text) = self.todo.as_mut().and_then(TodoRuntime::take_reminder) {
+            messages.push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
         }
         project_image_input(&mut messages, image_input, &self.model);
 
@@ -851,6 +888,17 @@ impl AgentEngine {
             tool_call_failure_fingerprint,
             all_tool_results_error,
         })
+    }
+
+    /// Hand the checklist to the output sink when it changed.
+    ///
+    /// The `let ... else` ends the mutable borrow of `self.todo` before the
+    /// shared borrow of `self.output`.
+    fn publish_todo_update(&mut self) {
+        let Some(todos) = self.todo.as_mut().and_then(TodoRuntime::take_changed_snapshot) else {
+            return;
+        };
+        self.output.emit_todo_update(&to_snapshots(&todos));
     }
 
     /// Emit each tool result to the output sink, resolving the tool name from
@@ -1591,6 +1639,7 @@ impl AgentEngine {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.context_state = self.context_state.clone();
+            session.todos = self.todo.as_ref().map(TodoRuntime::snapshot).unwrap_or_default();
             session.updated_at = Utc::now();
             if let Err(e) = mgr.save(session) {
                 self.output.emit_error(&format!("Failed to save session: {}", e));

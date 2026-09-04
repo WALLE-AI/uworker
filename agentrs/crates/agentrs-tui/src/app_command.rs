@@ -10,6 +10,7 @@ pub(super) enum ApplicationCommand {
     Resume(String),
     Skills,
     Status,
+    Todos,
 }
 
 impl ApplicationCommand {
@@ -26,6 +27,7 @@ impl ApplicationCommand {
             "resume" => Some(Self::Resume(args)),
             "skills" => Some(Self::Skills),
             "status" => Some(Self::Status),
+            "todos" => Some(Self::Todos),
             _ => None,
         }
     }
@@ -40,6 +42,7 @@ pub(super) fn application_command_specs() -> Vec<CommandSpec> {
         ("resume", "Resume a saved session"),
         ("skills", "Show loaded skills"),
         ("status", "Show session and context status"),
+        ("todos", "Show the current task checklist"),
     ]
     .into_iter()
     .map(|(name, description)| CommandSpec {

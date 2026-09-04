@@ -19,6 +19,7 @@ use agentrs_tools::glob::GlobTool;
 use agentrs_tools::grep::GrepTool;
 use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
+use agentrs_tools::todo::{TodoStore, TodoWriteTool};
 use agentrs_tools::tool_search::ToolSearchTool;
 use agentrs_tools::view_image::ViewImageTool;
 use agentrs_tools::web::fetch_tool::WebFetchTool;
@@ -38,6 +39,7 @@ use crate::skill_tool::SkillTool;
 use crate::spawn_tool::SpawnTool;
 use crate::spawner::AgentSpawner;
 use crate::summarizer::ProviderSummarizer;
+use crate::todo_reminder::TodoRuntime;
 use crate::tool_policy::ToolPolicy;
 
 /// Result of bootstrapping an agent engine with all features initialized.
@@ -178,6 +180,7 @@ impl AgentBootstrap {
 
         self.register_agent_tools(&mut registry, &provider, &environment.workspace, skills);
         let plan_active_flag = self.register_plan_tools(&mut registry);
+        let todo_store = self.register_todo_tool(&mut registry);
         self.register_tool_search(&mut registry);
 
         let has_mcp = mcp.has_mcp();
@@ -186,6 +189,7 @@ impl AgentBootstrap {
             provider.clone(),
             registry,
             plan_active_flag,
+            todo_store,
             environment.workspace,
             prompt_usage,
         );
@@ -412,6 +416,22 @@ impl AgentBootstrap {
         plan_active_flag
     }
 
+    /// Register `TodoWrite` and hand back the store it writes into.
+    ///
+    /// `None` when the tool is disabled, which is also what tells the engine
+    /// there is no checklist to persist or remind about.
+    fn register_todo_tool(&self, registry: &mut ToolRegistry) -> Option<Arc<TodoStore>> {
+        if !self.config.todo.enabled {
+            return None;
+        }
+        let store = Arc::new(TodoStore::new());
+        registry.register(Box::new(TodoWriteTool::new(
+            Arc::clone(&store),
+            self.config.todo.allow_parallel_in_progress,
+        )));
+        Some(store)
+    }
+
     fn register_tool_search(&self, registry: &mut ToolRegistry) {
         let tool_defs_snapshot = registry.to_tool_defs_filtered(|tool| self.tool_policy.allows(tool.name()));
         registry.register(Box::new(ToolSearchTool::new(tool_defs_snapshot)));
@@ -422,9 +442,11 @@ impl AgentBootstrap {
         provider: Arc<dyn LlmProvider>,
         registry: ToolRegistry,
         plan_active_flag: Arc<AtomicBool>,
+        todo_store: Option<Arc<TodoStore>>,
         workspace: PathBuf,
         prompt_usage: PromptUsage,
     ) -> AgentEngine {
+        let reminder_turns = self.config.todo.reminder_turns;
         let runtime_env = self.runtime_env.clone();
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider_and_env(
@@ -440,6 +462,9 @@ impl AgentBootstrap {
             AgentEngine::new_with_provider_and_env(provider, self.config, registry, self.output, workspace, runtime_env)
         };
         engine.set_plan_active_flag(plan_active_flag);
+        if let Some(store) = todo_store {
+            engine.set_todo_runtime(TodoRuntime::new(store, reminder_turns));
+        }
         engine.set_tool_policy(self.tool_policy);
         engine.set_prompt_usage(prompt_usage);
         engine

@@ -7,7 +7,7 @@ A Rust-based LLM tool-use agent for the command line. It connects to LLM APIs, a
 - **Multi-provider** — Anthropic, OpenAI (and compatibles like DeepSeek/Ollama/Gemini), AWS Bedrock, Google Vertex AI
 - **ProviderCompat layer** — Configuration-driven compatibility for provider quirks (no hardcoded conditionals)
 - **Reasoning model support** — Configurable thinking and reasoning effort for supported models
-- **Local tool suite** — Read, Write, Edit, ExecCommand, Grep, Glob, ViewImage, and Spawn (sub-agents), plus Skills, plan mode, and deferred tool discovery
+- **Local tool suite** — Read, Write, Edit, ExecCommand, Grep, Glob, ViewImage, TodoWrite, and Spawn (sub-agents), plus Skills, plan mode, and deferred tool discovery
 - **OpenAI Responses API** — Use either Chat Completions or Responses through the compatibility layer
 - **MCP client** — Connect to any [Model Context Protocol](https://modelcontextprotocol.io/) server (stdio / SSE / streamable-http)
 - **Dynamic MCP injection** — Host clients can inject MCP servers at runtime via the [JSON stream protocol](docs/json-stream-protocol.md)

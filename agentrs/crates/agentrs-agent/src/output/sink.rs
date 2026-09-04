@@ -1,3 +1,5 @@
+use agentrs_protocol::events::TodoSnapshot;
+
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
     /// Stream text delta from LLM
@@ -31,4 +33,11 @@ pub trait OutputSink: Send + Sync {
 
     /// Display informational message
     fn emit_info(&self, msg: &str);
+
+    /// Publish the task checklist after it changed.
+    ///
+    /// Carries the whole list, matching the tool's replace-only semantics.
+    /// Defaults to ignoring it: a plain terminal already sees the tool's own
+    /// receipt, so only sinks that maintain a live view need to react.
+    fn emit_todo_update(&self, _todos: &[TodoSnapshot]) {}
 }

@@ -201,6 +201,46 @@ mod tests {
     }
 
     #[test]
+    fn todo_updated_event_serializes_the_whole_list() {
+        let event = ProtocolEvent::TodoUpdated {
+            todos: vec![
+                TodoSnapshot {
+                    content: "Wire the store".into(),
+                    status: "in_progress".into(),
+                    active_form: Some("Wiring the store".into()),
+                },
+                TodoSnapshot {
+                    content: "Add tests".into(),
+                    status: "pending".into(),
+                    active_form: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(json["type"], "todo_updated");
+        assert_eq!(json["todos"][0]["content"], "Wire the store");
+        assert_eq!(json["todos"][0]["status"], "in_progress");
+        assert_eq!(json["todos"][0]["active_form"], "Wiring the store");
+        // An absent activeForm is omitted rather than sent as null, so hosts can
+        // treat presence as meaning.
+        assert!(json["todos"][1].get("active_form").is_none());
+    }
+
+    #[test]
+    fn an_empty_todo_update_still_carries_the_key() {
+        let event = ProtocolEvent::TodoUpdated { todos: Vec::new() };
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(json["type"], "todo_updated");
+        assert_eq!(
+            json["todos"],
+            json!([]),
+            "clearing the list must be distinguishable from no update at all"
+        );
+    }
+
+    #[test]
     fn test_config_changed_event_serialization() {
         let event = ProtocolEvent::ConfigChanged {
             capabilities: Capabilities {

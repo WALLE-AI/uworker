@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use agentrs_agent::commands::CommandSpec;
+use agentrs_protocol::events::TodoSnapshot;
 use agentrs_types::message::{Message, TokenUsage};
 
 use crate::app_command::application_command_specs;
@@ -65,6 +66,9 @@ pub(super) struct AppState {
     pub(super) spinner_frame: usize,
     pub(super) usage: TokenUsage,
     pub(super) turns: usize,
+    /// Latest task checklist published by the agent. Whole-list replacement,
+    /// mirroring the tool's own semantics.
+    pub(super) todos: Vec<TodoSnapshot>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
     active_tools: HashMap<String, usize>,
@@ -104,6 +108,7 @@ impl AppState {
             spinner_frame: 0,
             usage: TokenUsage::default(),
             turns: 0,
+            todos: Vec::new(),
             active_assistant: None,
             active_thinking: None,
             active_tools: HashMap::new(),
@@ -148,6 +153,7 @@ impl AppState {
         self.spinner_frame = 0;
         self.usage = TokenUsage::default();
         self.turns = 0;
+        self.todos.clear();
         self.composer.clear();
         self.popup.update("");
         self.session_picker.close();
@@ -322,7 +328,46 @@ impl AppState {
                 }
                 self.update_tool_step(&call_id, &name, ToolStepStatus::Cancelled, Some(reason));
             }
+            AgentEvent::TodoUpdated(todos) => self.todos = todos,
         }
+    }
+
+    /// The entry the agent is working on right now, if exactly the one.
+    ///
+    /// `None` once several are in progress: naming one of them in the status
+    /// line would be arbitrary, and naming all of them would not fit.
+    pub(super) fn active_todo(&self) -> Option<&TodoSnapshot> {
+        let mut active = self.todos.iter().filter(|todo| todo.status == "in_progress");
+        let first = active.next()?;
+        active.next().is_none().then_some(first)
+    }
+
+    /// The full checklist as text, for `/todos`.
+    ///
+    /// Unlike the panel this elides nothing: the command exists precisely to
+    /// see the entries the panel had to cut.
+    pub(super) fn todo_summary(&self) -> String {
+        if self.todos.is_empty() {
+            return "No tasks tracked in this session".to_string();
+        }
+        let done = self.todos.iter().filter(|todo| todo.status == "completed").count();
+        let mut text = format!("{}/{} completed", done, self.todos.len());
+        for todo in &self.todos {
+            let marker = match todo.status.as_str() {
+                "completed" => "✓",
+                "in_progress" => "▸",
+                _ => "○",
+            };
+            text.push_str(&format!("\n  {marker} {}", todo.content));
+        }
+        text
+    }
+
+    /// Text for the busy status line: the active task's present-continuous
+    /// form, falling back to its content when the model omitted `activeForm`.
+    pub(super) fn active_todo_label(&self) -> Option<&str> {
+        self.active_todo()
+            .map(|todo| todo.active_form.as_deref().unwrap_or(&todo.content))
     }
 
     fn update_tool_step(&mut self, call_id: &str, name: &str, status: ToolStepStatus, text: Option<String>) {

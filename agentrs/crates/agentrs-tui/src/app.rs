@@ -336,6 +336,9 @@ impl TuiRuntime {
                 };
                 self.state.push_info("Skills", text);
             }
+            ApplicationCommand::Todos => {
+                self.state.push_info("Tasks", self.state.todo_summary());
+            }
         }
         CommandAction::Handled
     }

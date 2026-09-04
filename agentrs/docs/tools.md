@@ -11,6 +11,7 @@ The agent includes a core local tool suite and agent-level helpers. The LLM auto
 | **Grep** | Regex search file contents (via ripgrep) | Yes |
 | **Glob** | Find files by pattern matching | Yes |
 | **ViewImage** | Load a local JPEG, PNG, GIF, or WebP image for model inspection | Yes |
+| **TodoWrite** | Maintain the session task checklist | No |
 | **WebFetch** | Fetch a URL, convert it to Markdown, and answer a prompt about it | Yes |
 | **WebSearch** | Search the web through a configured provider | Yes |
 | **Spawn** | Spawn sub-agents for parallel tasks | No |
@@ -71,6 +72,33 @@ Load a supported local image and attach it to the next model turn.
 - Accepts an absolute file path
 - Supports JPEG, PNG, GIF, and WebP files up to 20 MB
 - Validates that the file content matches its extension
+
+## TodoWrite
+
+Maintain a structured task checklist for the current session, so multi-step work stays tracked and its progress is visible to the user.
+
+- Takes `todos`, the **complete** list. Each call replaces the previous list: there are no partial updates and no per-item edits.
+- Each entry has `content` (imperative, e.g. `Run the test suite`), a `status` of `pending`, `in_progress` or `completed`, and an optional `activeForm` (present continuous, e.g. `Running the test suite`) shown while the task is in progress.
+- Entries are rejected when `content` is blank or duplicated, and — unless the deployment allows parallel work — when more than one task is `in_progress`. A rejected call leaves the previous list untouched.
+- Returns a count summary rather than the list itself, since the list is already in the call arguments.
+- Categorized as an `Info` tool, so it stays available in plan mode and needs no approval.
+
+The checklist is rebuilt automatically when a session is resumed or forked, by replaying the last successful `TodoWrite` call out of the conversation. A session forked at an earlier turn therefore gets the checklist that was live at that turn. When a full compaction has folded the history away, the snapshot stored in the session file is used instead.
+
+A checklist whose entries are all `completed` is retired when the next user turn opens, so the finished list stays visible through the end of the turn that finished it. An unfinished list survives across turns.
+
+If the tool goes unused for `reminder_turns` assistant turns, the engine injects a one-off reminder carrying the current list. The reminder rides along on that single request and is never written into the session history.
+
+```toml
+[todo]
+enabled = true                      # register the tool at all
+allow_parallel_in_progress = false  # allow several in_progress tasks at once
+reminder_turns = 10                 # turns without a call before nudging; 0 disables
+```
+
+`allow_parallel_in_progress` drives both the validation and the wording of the tool description, so the instructions the model reads always match the rule it is judged against. Sub-agents spawned via **Spawn** get their own `TodoWrite` backed by their own store, so a sub-agent plans and tracks its own multi-step work without any way to observe or overwrite the checklist that spawned it. A fork override that narrows the child's tools can take `TodoWrite` away like any other tool.
+
+Changes to the checklist are published to the UI: the TUI shows a live panel above the composer and names the active task in its status line (using `activeForm` when present), and `/todos` prints the full list. Hosts on the JSON stream protocol receive a [`todo_updated`](json-stream-protocol.md#114-todo_updated) event carrying the whole list.
 
 ## WebFetch
 

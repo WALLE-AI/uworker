@@ -161,6 +161,80 @@ mod tests {
         assert!(!denied.content.contains("\"name\": \"DeniedDeferred\""));
     }
 
+    // --- Todo tool registration ---
+
+    fn registered_todo(config: Config) -> (Vec<String>, bool) {
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let mut registry = ToolRegistry::new();
+
+        let store = bootstrap.register_todo_tool(&mut registry);
+
+        (registry.tool_names(), store.is_some())
+    }
+
+    #[test]
+    fn todo_write_is_registered_by_default() {
+        let (names, has_store) = registered_todo(test_config());
+        assert!(names.contains(&"TodoWrite".to_string()), "got {names:?}");
+        assert!(has_store, "the engine needs the store to persist and remind");
+    }
+
+    #[test]
+    fn a_disabled_todo_section_registers_nothing() {
+        let mut config = test_config();
+        config.todo.enabled = false;
+
+        let (names, has_store) = registered_todo(config);
+        assert!(!names.contains(&"TodoWrite".to_string()), "got {names:?}");
+        assert!(!has_store, "no store means no checklist to persist or remind about");
+    }
+
+    #[tokio::test]
+    async fn the_registered_todo_tool_follows_the_parallel_policy() {
+        let mut config = test_config();
+        config.todo.allow_parallel_in_progress = true;
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let mut registry = ToolRegistry::new();
+        bootstrap.register_todo_tool(&mut registry);
+
+        let tool = registry.get("TodoWrite").expect("registered");
+        assert!(
+            tool.description().contains("several at once"),
+            "the description must reflect the configured policy"
+        );
+
+        let result = tool
+            .execute(json!({
+                "todos": [
+                    { "content": "A", "status": "in_progress" },
+                    { "content": "B", "status": "in_progress" }
+                ]
+            }))
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn the_default_todo_tool_enforces_a_single_active_task() {
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(test_config(), "/tmp", output);
+        let mut registry = ToolRegistry::new();
+        bootstrap.register_todo_tool(&mut registry);
+
+        let tool = registry.get("TodoWrite").expect("registered");
+        let result = tool
+            .execute(json!({
+                "todos": [
+                    { "content": "A", "status": "in_progress" },
+                    { "content": "B", "status": "in_progress" }
+                ]
+            }))
+            .await;
+        assert!(result.is_error, "the default policy allows only one active task");
+    }
+
     // --- Web tool registration (TC-1.6-06, TC-2.3-01 through TC-2.3-05) ---
 
     fn registered_web_tools(config: Config) -> Vec<String> {

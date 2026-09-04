@@ -25,6 +25,7 @@ fn minimal_config() -> Config {
         compact: Default::default(),
         compact_context_window_source: agentrs_config::config::CompactContextWindowSource::Default,
         plan: Default::default(),
+        todo: Default::default(),
         shell: Default::default(),
         file_cache: Default::default(),
         hooks: Default::default(),

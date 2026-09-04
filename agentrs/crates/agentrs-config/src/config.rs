@@ -11,6 +11,7 @@ use crate::hooks::HooksConfig;
 use crate::logging::LoggingConfig;
 use crate::plan::PlanConfig;
 use crate::shell::ShellConfig;
+use crate::todo::TodoConfig;
 use crate::tui::TuiConfig;
 use crate::web::WebConfig;
 use agentrs_types::llm::ThinkingConfig;
@@ -101,6 +102,9 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub plan: PlanConfig,
+
+    #[serde(default)]
+    pub todo: TodoConfig,
 
     #[serde(default)]
     pub shell: ShellConfig,
@@ -309,6 +313,7 @@ pub struct Config {
     /// model changes may safely recompute it.
     pub compact_context_window_source: CompactContextWindowSource,
     pub plan: PlanConfig,
+    pub todo: TodoConfig,
     pub shell: ShellConfig,
     pub file_cache: FileCacheConfig,
     pub hooks: HooksConfig,
@@ -501,6 +506,7 @@ impl Config {
             compact,
             compact_context_window_source,
             plan: merged.plan,
+            todo: merged.todo,
             shell: merged.shell,
             file_cache: merged.file_cache,
             hooks: merged.hooks,
@@ -829,6 +835,14 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.plan
     };
 
+    // Todo: the project file wins whenever it deviates from the default, the
+    // same all-or-nothing strategy the other single-value sections use.
+    let todo = if project.todo != TodoConfig::default() {
+        project.todo
+    } else {
+        global.todo
+    };
+
     // File cache: project overrides global if any field differs from default.
     let file_cache = if !project.file_cache.enabled
         || project.file_cache.max_entries != FileCacheConfig::default().max_entries
@@ -890,6 +904,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         session,
         compact,
         plan,
+        todo,
         shell,
         file_cache,
         hooks,

@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use agentrs_tools::todo::TodoItem;
 use agentrs_types::message::{ContentBlock, Message, Role, TokenUsage};
 
 use crate::context_usage::ContextState;
@@ -33,6 +34,14 @@ pub struct Session {
     pub total_usage: TokenUsage,
     #[serde(default)]
     pub context_state: ContextState,
+    /// Last known task checklist.
+    ///
+    /// The checklist is normally rebuilt by replaying `TodoWrite` calls out of
+    /// `messages`, which keeps forks correct for free. This snapshot is the
+    /// fallback for the one case replay cannot cover: a full autocompact
+    /// replaces the history with a summary and takes every tool call with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<TodoItem>,
     pub messages: Vec<Message>,
 }
 
@@ -92,6 +101,7 @@ impl SessionManager {
             cwd: cwd.to_string(),
             total_usage: TokenUsage::default(),
             context_state: ContextState::default(),
+            todos: Vec::new(),
             messages: Vec::new(),
         };
         self.with_session_lock(&session.id, || {

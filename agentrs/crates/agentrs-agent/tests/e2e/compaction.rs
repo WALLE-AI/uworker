@@ -51,6 +51,7 @@ fn openai_config(api_key: &str) -> Config {
         compact: agentrs_config::compact::CompactConfig::default(),
         compact_context_window_source: agentrs_config::config::CompactContextWindowSource::Default,
         plan: agentrs_config::plan::PlanConfig::default(),
+        todo: agentrs_config::todo::TodoConfig::default(),
         shell: agentrs_config::shell::ShellConfig::default(),
         file_cache: agentrs_config::file_cache::FileCacheConfig::default(),
         hooks: HooksConfig::default(),

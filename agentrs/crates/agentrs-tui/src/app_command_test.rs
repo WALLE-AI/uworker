@@ -27,3 +27,9 @@ fn catalog_contains_only_tui_owned_commands() {
     assert!(!specs.iter().any(|spec| spec.name == "compact"));
     assert!(!specs.iter().any(|spec| spec.name == "help"));
 }
+
+#[test]
+fn parses_the_todos_command() {
+    assert_eq!(ApplicationCommand::parse("/todos"), Some(ApplicationCommand::Todos));
+    assert!(application_command_specs().iter().any(|spec| spec.name == "todos"));
+}

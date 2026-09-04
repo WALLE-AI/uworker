@@ -294,7 +294,32 @@ Emitted after a dynamically injected MCP server has connected and its tools are 
 | `name` | string | Server name (as provided in `add_mcp_server`) |
 | `tools` | string[] | List of tool names registered from this server |
 
-### 1.14 `pong`
+### 1.14 `todo_updated`
+
+Emitted whenever the agent's task checklist changes: after a tool round that modified it, when a resumed session restores one, and when a completed list is retired at the start of a new turn.
+
+```json
+{
+  "type": "todo_updated",
+  "todos": [
+    { "content": "Wire the store", "status": "in_progress", "active_form": "Wiring the store" },
+    { "content": "Add tests", "status": "pending" }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `todos` | object[] | The complete checklist |
+| `todos[].content` | string | The task, in the imperative |
+| `todos[].status` | string | `pending`, `in_progress`, or `completed` |
+| `todos[].active_form` | string? | Present-continuous form for display while the task is in progress. Omitted when the model did not supply one — fall back to `content` |
+
+The event carries the **whole list**, matching the `TodoWrite` tool's replace-only semantics: render this snapshot and discard whatever you held before. An empty `todos` array means the checklist was cleared, which is distinct from receiving no event at all. Treat `status` as an open string: display an unfamiliar value rather than failing to parse the frame.
+
+Only emitted when the checklist actually changed, so an unchanged list will not re-send on every turn, and a session that never uses the tool emits nothing.
+
+### 1.15 `pong`
 
 Response to a `ping` command from the client. Used for heartbeat/liveness detection.
 
