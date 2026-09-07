@@ -613,3 +613,49 @@ TUI 常驻面板、`active_form` 驱动 spinner、`/todos` 斜杠命令（对标
 - **端到端实测**（本地 vLLM `Qwen3.6-35B-A3B`，见 [[local-llm-endpoints]]）：
   模型自发使用 TodoWrite 规划三步、单活跃纪律成立、`activeForm` 正常给出、计数与状态流转正确；
   会话文件正确落 `todos`；`--resume` + `--json-stream` 下 `todo_updated` 事件按重放结果恰好发一次。
+
+---
+
+## 9. 执行记录补遗（2026-09-07）：子 agent 清单与 Phase 3
+
+用户明确要求继续推进，故在 §8 之后又完成两项。
+
+### 9.1 子 agent 也获得 TodoWrite
+
+原实现里 `spawner.rs` 的子 agent registry 不含 TodoWrite，子 agent 无法跟踪自己的多步工作。
+现在每个子 agent 在 `build_tool_registry` 里自建 `TodoStore` 并注册 TodoWrite：
+隔离性仍是结构性的（各自 engine、各自 store，父子互不可见），fork override 也能像收走其他工具一样收走它。
+§8.2 表格第 4 行「子 agent 干脆不注册该工具」的描述由此作废。
+
+### 9.2 Phase 3：任务图（`mode = "graph"`）
+
+§7 原本把 Phase 3 标为「观望」，理由是「依赖图 + 文件锁的复杂度收不回成本」。
+用户要求实施，故按方案建成，但对 agentrs 的实际并发模型做了两处调整：
+
+| 方案设想 | 实际实现 | 原因 |
+|---|---|---|
+| 每任务一文件 + 高水位 ID 文件 + 文件锁（对标 claude-code） | 单个 `tasks.json` + 该文件上的独占锁，`next_id` 存在同一文件里 | claude-code 的每任务文件是为进程级 swarm 服务的；单文件 + 一把锁让「认领任务」这个读-改-写天然原子，高水位问题也随之消失 |
+| 强调多 agent 抢占 | 保留 OS 文件锁，但注明 agentrs 子 agent 是**进程内**的 | 进程内并发用不上 OS 锁，但留着它才能保证两个 agentrs 进程共享同一 workspace 时不会写坏图 |
+
+工具四件套：`TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate`，与 `TodoWrite` **互斥**（`[todo] mode` 二选一）。
+
+store 强制执行 schema 表达不了的约束：
+- 被未完成任务阻塞时拒绝置 `in_progress` / `completed`，错误里点名 blocker 并指出 `removeBlockedBy` 这条出路；`pending` 永远允许；
+- 依赖双向镜像（A blocks B 同时写两侧），删除任务时清除所有指向它的边，不留悬空依赖；
+- 拒绝自依赖与环，并把将要成环的路径打印出来；菱形（两支汇聚）不是环，放行；
+- 状态是对**本次调用之后**的图判定的，所以「同一次调用里去掉依赖并开始任务」可行；
+- 删除后 ID 不复用——复用会让仍然引用旧 ID 的依赖静默指向新任务。
+
+**Phase 2 的 UI 在 graph 模式下同样可用**：`TodoRuntime` 抽象成 `PlanSource::{List, Graph}`，
+task 转成 `TodoSnapshot` 时把 id 前缀进 subject（`#2 Build it`），这样 TUI 面板、
+状态行与 `todo_updated` 协议事件全部复用，"blocked by 1" 才能被顺着找到对应任务。
+两点差异：graph 的任务**不写进会话文件**（磁盘已是唯一真相，`TaskList` 就是模型重读状态的方式），
+且**永不自动退休**（任务按 id 寻址，背着模型删掉会让引用它的依赖悬空）。
+
+实现中发现并修掉一个真 bug：`TaskFile` 的 `#[serde(default = "first_id")]` 只在反序列化时生效，
+derive 出来的 `Default` 会让 `next_id` 从 0 开始——首个任务拿到 id "0"，
+而重开 store 后又从 "1" 开始。已改为手写 `Default`。
+
+**验证**：`fmt` / `clippy` 干净；全量测试失败集合仍与基线逐字节一致；
+task 模块新增 39 个测试。端到端（本地 vLLM）实测：模型一次 `TaskCreate` 建三个任务并用 `blockedBy`
+串起依赖（含引用同批次兄弟任务），双向边正确落盘，`TaskUpdate` 对被阻塞任务的拒绝信息按预期返回给模型。

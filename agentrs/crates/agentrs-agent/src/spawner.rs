@@ -89,7 +89,7 @@ impl AgentSpawner {
         );
         engine.set_tool_policy(child_policy);
         if let Some(store) = todo_store {
-            engine.set_todo_runtime(TodoRuntime::new(store, reminder_turns));
+            engine.set_todo_runtime(TodoRuntime::for_list(store, reminder_turns));
         }
 
         match engine.run(&sub_config.prompt, "").await {
@@ -177,7 +177,7 @@ impl Spawner for AgentSpawner {
         engine.set_initial_reasoning_effort(overrides.effort.clone());
         engine.set_tool_policy(child_policy);
         if let Some(store) = todo_store {
-            engine.set_todo_runtime(TodoRuntime::new(store, reminder_turns));
+            engine.set_todo_runtime(TodoRuntime::for_list(store, reminder_turns));
         }
 
         match engine.run(&sub_config.prompt, "").await {

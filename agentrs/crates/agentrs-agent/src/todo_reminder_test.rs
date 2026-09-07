@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use agentrs_tools::task::{TaskDraft, TaskPatch, TaskStore};
 use agentrs_tools::todo::{TodoItem, TodoStatus, TodoStore};
 use agentrs_types::message::ContentBlock;
 use serde_json::json;
+use tempfile::TempDir;
 
-use super::TodoRuntime;
+use super::{PlanSource, TodoRuntime};
 
 const REMINDER_TURNS: usize = 10;
 
@@ -18,7 +20,7 @@ fn item(content: &str, status: TodoStatus) -> TodoItem {
 
 fn runtime(reminder_turns: usize) -> (TodoRuntime, Arc<TodoStore>) {
     let store = Arc::new(TodoStore::new());
-    (TodoRuntime::new(Arc::clone(&store), reminder_turns), store)
+    (TodoRuntime::for_list(Arc::clone(&store), reminder_turns), store)
 }
 
 fn todo_write_call() -> Vec<ContentBlock> {
@@ -179,5 +181,141 @@ fn retiring_an_already_empty_list_is_a_no_op() {
 fn snapshot_reflects_the_shared_store() {
     let (runtime, store) = runtime(REMINDER_TURNS);
     store.replace(vec![item("A", TodoStatus::Pending)]);
-    assert_eq!(runtime.snapshot().len(), 1);
+    assert_eq!(runtime.checklist().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Graph mode
+// ---------------------------------------------------------------------------
+
+fn graph_runtime(reminder_turns: usize) -> (TodoRuntime, Arc<TaskStore>, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Arc::new(TaskStore::new(dir.path().join("tasks")));
+    (
+        TodoRuntime::new(PlanSource::Graph(Arc::clone(&store)), reminder_turns),
+        store,
+        dir,
+    )
+}
+
+fn task_draft(subject: &str) -> TaskDraft {
+    TaskDraft {
+        subject: subject.to_string(),
+        description: String::new(),
+        active_form: None,
+        owner: None,
+        blocked_by: Vec::new(),
+    }
+}
+
+fn task_call(name: &str) -> Vec<ContentBlock> {
+    vec![ContentBlock::ToolUse {
+        id: "call-1".to_string(),
+        name: name.to_string(),
+        input: json!({}),
+        extra: None,
+    }]
+}
+
+#[test]
+fn the_graph_publishes_tasks_with_their_ids() {
+    let (mut runtime, store, _dir) = graph_runtime(REMINDER_TURNS);
+    store
+        .create(vec![task_draft("Design the API"), task_draft("Build it")])
+        .expect("create");
+
+    let published = runtime.take_changed_snapshot().expect("the graph changed");
+    assert_eq!(published.len(), 2);
+    assert_eq!(
+        published[0].content, "#1 Design the API",
+        "the id has to survive so a blocked-by message can be followed"
+    );
+    assert_eq!(published[0].status, "pending");
+}
+
+#[test]
+fn an_unchanged_graph_does_not_republish() {
+    let (mut runtime, store, _dir) = graph_runtime(REMINDER_TURNS);
+    store.create(vec![task_draft("Only task")]).expect("create");
+
+    assert!(runtime.take_changed_snapshot().is_some());
+    assert!(runtime.take_changed_snapshot().is_none());
+}
+
+#[test]
+fn any_task_tool_resets_the_graph_countdown() {
+    for tool in ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"] {
+        let (mut runtime, _store, _dir) = graph_runtime(REMINDER_TURNS);
+        for _ in 0..REMINDER_TURNS - 1 {
+            runtime.record_turn(&other_call());
+        }
+        runtime.record_turn(&task_call(tool));
+
+        for _ in 0..REMINDER_TURNS - 1 {
+            runtime.record_turn(&other_call());
+            assert!(
+                runtime.take_reminder().is_none(),
+                "{tool} should have reset the countdown"
+            );
+        }
+    }
+}
+
+#[test]
+fn todo_write_does_not_count_as_tracking_in_graph_mode() {
+    let (mut runtime, _store, _dir) = graph_runtime(REMINDER_TURNS);
+    for _ in 0..REMINDER_TURNS {
+        runtime.record_turn(&todo_write_call());
+    }
+
+    assert!(
+        runtime.take_reminder().is_some(),
+        "TodoWrite is not registered in graph mode, so it cannot count as progress"
+    );
+}
+
+#[test]
+fn the_graph_reminder_names_the_task_tools() {
+    let (mut runtime, _store, _dir) = graph_runtime(REMINDER_TURNS);
+    for _ in 0..REMINDER_TURNS {
+        runtime.record_turn(&other_call());
+    }
+
+    let reminder = runtime.take_reminder().expect("due");
+    assert!(reminder.contains("task tools"), "got: {reminder}");
+    assert!(!reminder.contains("TodoWrite"), "got: {reminder}");
+}
+
+#[test]
+fn graph_tasks_are_never_retired_behind_the_models_back() {
+    let (runtime, store, _dir) = graph_runtime(REMINDER_TURNS);
+    store.create(vec![task_draft("Done")]).expect("create");
+    store
+        .update(
+            "1",
+            TaskPatch {
+                status: Some(TodoStatus::Completed),
+                ..TaskPatch::default()
+            },
+        )
+        .expect("complete");
+
+    runtime.on_user_turn_start();
+
+    assert_eq!(
+        store.list().expect("read").len(),
+        1,
+        "tasks are addressable by id; dropping one would strand every dependency naming it"
+    );
+}
+
+#[test]
+fn the_session_snapshot_stays_empty_in_graph_mode() {
+    let (runtime, store, _dir) = graph_runtime(REMINDER_TURNS);
+    store.create(vec![task_draft("On disk")]).expect("create");
+
+    assert!(
+        runtime.checklist().is_empty(),
+        "the graph is already durable on disk; mirroring it into the session file would be a second source of truth"
+    );
 }

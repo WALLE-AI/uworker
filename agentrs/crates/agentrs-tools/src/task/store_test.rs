@@ -70,13 +70,19 @@ fn ids_are_never_reused_after_a_delete() {
 #[test]
 fn a_dependency_is_recorded_on_both_sides() {
     let (store, _dir) = store();
-    store.create(vec![draft("Design"), blocked_draft("Build", &["1"])]).expect("create");
+    store
+        .create(vec![draft("Design"), blocked_draft("Build", &["1"])])
+        .expect("create");
 
     let design = store.get("1").expect("read").expect("exists");
     let build = store.get("2").expect("read").expect("exists");
 
     assert_eq!(build.blocked_by, vec!["1".to_string()]);
-    assert_eq!(design.blocks, vec!["2".to_string()], "the mirror side must be kept in sync");
+    assert_eq!(
+        design.blocks,
+        vec!["2".to_string()],
+        "the mirror side must be kept in sync"
+    );
 }
 
 #[test]
@@ -155,7 +161,9 @@ fn a_diamond_is_not_mistaken_for_a_cycle() {
 #[test]
 fn a_blocked_task_cannot_be_started_or_completed() {
     let (store, _dir) = store();
-    store.create(vec![draft("Design"), blocked_draft("Build", &["1"])]).expect("create");
+    store
+        .create(vec![draft("Design"), blocked_draft("Build", &["1"])])
+        .expect("create");
 
     for status in [TaskStatus::InProgress, TaskStatus::Completed] {
         let error = store.update("2", status_patch(status)).unwrap_err();
@@ -170,10 +178,16 @@ fn a_blocked_task_cannot_be_started_or_completed() {
 #[test]
 fn finishing_the_blocker_unblocks_the_task() {
     let (store, _dir) = store();
-    store.create(vec![draft("Design"), blocked_draft("Build", &["1"])]).expect("create");
+    store
+        .create(vec![draft("Design"), blocked_draft("Build", &["1"])])
+        .expect("create");
 
-    store.update("1", status_patch(TaskStatus::Completed)).expect("blocker done");
-    let build = store.update("2", status_patch(TaskStatus::InProgress)).expect("now startable");
+    store
+        .update("1", status_patch(TaskStatus::Completed))
+        .expect("blocker done");
+    let build = store
+        .update("2", status_patch(TaskStatus::InProgress))
+        .expect("now startable");
 
     assert_eq!(build.status, TaskStatus::InProgress);
 }
@@ -181,7 +195,9 @@ fn finishing_the_blocker_unblocks_the_task() {
 #[test]
 fn a_blocked_task_may_still_be_left_pending() {
     let (store, _dir) = store();
-    store.create(vec![draft("Design"), blocked_draft("Build", &["1"])]).expect("create");
+    store
+        .create(vec![draft("Design"), blocked_draft("Build", &["1"])])
+        .expect("create");
 
     store
         .update("2", status_patch(TaskStatus::Pending))
@@ -191,7 +207,9 @@ fn a_blocked_task_may_still_be_left_pending() {
 #[test]
 fn dropping_the_dependency_and_starting_in_one_call_is_allowed() {
     let (store, _dir) = store();
-    store.create(vec![draft("Design"), blocked_draft("Build", &["1"])]).expect("create");
+    store
+        .create(vec![draft("Design"), blocked_draft("Build", &["1"])])
+        .expect("create");
 
     let patch = TaskPatch {
         status: Some(TaskStatus::InProgress),
@@ -255,7 +273,10 @@ fn updating_or_deleting_an_unknown_task_is_refused() {
     let (store, _dir) = store();
     let missing = TaskError::NotFound { id: "7".to_string() };
 
-    assert_eq!(store.update("7", status_patch(TaskStatus::Pending)).unwrap_err(), missing);
+    assert_eq!(
+        store.update("7", status_patch(TaskStatus::Pending)).unwrap_err(),
+        missing
+    );
     assert_eq!(store.delete("7").unwrap_err(), missing);
 }
 
@@ -265,7 +286,9 @@ fn the_graph_survives_a_reopen() {
     let path = dir.path().join("tasks");
 
     let first = TaskStore::new(path.clone());
-    first.create(vec![draft("Design"), blocked_draft("Build", &["1"])]).expect("create");
+    first
+        .create(vec![draft("Design"), blocked_draft("Build", &["1"])])
+        .expect("create");
 
     let second = TaskStore::new(path);
     let tasks = second.list().expect("read");

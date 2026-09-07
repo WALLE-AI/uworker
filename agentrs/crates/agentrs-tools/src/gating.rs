@@ -7,14 +7,32 @@
 //! give the same answer.
 
 /// Names that are gated behind configuration rather than absent from the build.
-const GATED_TOOLS: [&str; 3] = ["WebFetch", "WebSearch", "TodoWrite"];
+const GATED_TOOLS: [&str; 7] = [
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+    "TaskCreate",
+    "TaskList",
+    "TaskGet",
+    "TaskUpdate",
+];
+
+/// The task-graph family, which is registered as a unit by `mode = "graph"`.
+const TASK_TOOLS: [&str; 4] = ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"];
 
 /// Web-family members. Their hints depend on which siblings are registered,
 /// so they are resolved as a group rather than one name at a time.
 const WEB_TOOLS: [&str; 2] = ["WebFetch", "WebSearch"];
 
-const TODO_DISABLED_HINT: &str = "TodoWrite is compiled in but disabled: set `enabled = true` under \
-`[todo]` in the agentrs config file (`agentrs config path` prints its location).";
+const TODO_DISABLED_HINT: &str = "TodoWrite is compiled in but disabled. Either task tracking is off \
+(set `enabled = true` under `[todo]`), or the workspace runs the task graph instead \
+(`mode = \"graph\"`), in which case use TaskCreate / TaskList / TaskGet / TaskUpdate. Run `agentrs \
+config path` to find the config file.";
+
+const TASK_DISABLED_HINT: &str = "The task-graph tools are compiled in but not registered. They only \
+exist when the workspace opts into them with `mode = \"graph\"` under `[todo]`; the default is the \
+flat checklist, where TodoWrite is the tool to use. Run `agentrs config path` to find the config \
+file.";
 
 const WEB_DISABLED_HINT: &str = "The web tools are compiled in but disabled: set `enabled = true` under \
 `[web]` in the agentrs config file (`agentrs config path` prints its location).";
@@ -35,10 +53,14 @@ pub fn missing_tool_hint(name: &str, is_registered: impl Fn(&str) -> bool) -> Op
     if !GATED_TOOLS.contains(&name) {
         return None;
     }
-    // TodoWrite has a single on/off switch, so reaching here is already the
-    // whole answer; no sibling needs consulting.
+    // The two tracking modes are alternatives, so a missing tool from one of
+    // them usually means the other is active. Say so rather than only naming
+    // the on/off switch.
     if name == "TodoWrite" {
         return Some(TODO_DISABLED_HINT);
+    }
+    if TASK_TOOLS.contains(&name) {
+        return Some(TASK_DISABLED_HINT);
     }
     if !WEB_TOOLS.iter().any(|tool| is_registered(tool)) {
         return Some(WEB_DISABLED_HINT);

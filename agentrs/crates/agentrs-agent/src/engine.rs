@@ -42,7 +42,6 @@ use agentrs_protocol::events::ToolCategory;
 use agentrs_protocol::writer::ProtocolEmitter;
 use agentrs_providers::provider::{LlmProvider, create_provider};
 use agentrs_tools::registry::ToolRegistry;
-use agentrs_tools::todo::to_snapshots;
 use agentrs_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
 use agentrs_types::message::{ContentBlock, ImageInputCapability, Message, Role, StopReason, TokenUsage};
 use agentrs_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
@@ -898,7 +897,7 @@ impl AgentEngine {
         let Some(todos) = self.todo.as_mut().and_then(TodoRuntime::take_changed_snapshot) else {
             return;
         };
-        self.output.emit_todo_update(&to_snapshots(&todos));
+        self.output.emit_todo_update(&todos);
     }
 
     /// Emit each tool result to the output sink, resolving the tool name from
@@ -1639,7 +1638,7 @@ impl AgentEngine {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.context_state = self.context_state.clone();
-            session.todos = self.todo.as_ref().map(TodoRuntime::snapshot).unwrap_or_default();
+            session.todos = self.todo.as_ref().map(TodoRuntime::checklist).unwrap_or_default();
             session.updated_at = Utc::now();
             if let Err(e) = mgr.save(session) {
                 self.output.emit_error(&format!("Failed to save session: {}", e));

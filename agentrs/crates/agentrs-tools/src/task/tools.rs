@@ -76,13 +76,7 @@ fn parse_status(raw: &str) -> Result<TaskStatus, TaskError> {
 fn string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default()
 }
 
@@ -166,7 +160,11 @@ impl Tool for TaskCreateTool {
         let drafts: Vec<TaskDraft> = items
             .iter()
             .map(|item| TaskDraft {
-                subject: item.get("subject").and_then(Value::as_str).unwrap_or_default().to_string(),
+                subject: item
+                    .get("subject")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 description: item
                     .get("description")
                     .and_then(Value::as_str)

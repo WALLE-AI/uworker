@@ -164,13 +164,14 @@ mod tests {
     // --- Todo tool registration ---
 
     fn registered_todo(config: Config) -> (Vec<String>, bool) {
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
-        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let bootstrap = AgentBootstrap::new(config, workspace.path().to_string_lossy(), output);
         let mut registry = ToolRegistry::new();
 
-        let store = bootstrap.register_todo_tool(&mut registry);
+        let source = bootstrap.register_task_tracking(&mut registry, workspace.path());
 
-        (registry.tool_names(), store.is_some())
+        (registry.tool_names(), source.is_some())
     }
 
     #[test]
@@ -197,7 +198,7 @@ mod tests {
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let bootstrap = AgentBootstrap::new(config, "/tmp", output);
         let mut registry = ToolRegistry::new();
-        bootstrap.register_todo_tool(&mut registry);
+        bootstrap.register_task_tracking(&mut registry, std::path::Path::new("/tmp"));
 
         let tool = registry.get("TodoWrite").expect("registered");
         assert!(
@@ -221,7 +222,7 @@ mod tests {
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let bootstrap = AgentBootstrap::new(test_config(), "/tmp", output);
         let mut registry = ToolRegistry::new();
-        bootstrap.register_todo_tool(&mut registry);
+        bootstrap.register_task_tracking(&mut registry, std::path::Path::new("/tmp"));
 
         let tool = registry.get("TodoWrite").expect("registered");
         let result = tool
@@ -233,6 +234,47 @@ mod tests {
             }))
             .await;
         assert!(result.is_error, "the default policy allows only one active task");
+    }
+
+    #[test]
+    fn graph_mode_registers_the_task_family_instead_of_the_checklist() {
+        let mut config = test_config();
+        config.todo.mode = agentrs_config::todo::TodoMode::Graph;
+
+        let (names, has_checklist_store) = registered_todo(config);
+
+        for tool in ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"] {
+            assert!(names.contains(&tool.to_string()), "{tool} missing from {names:?}");
+        }
+        assert!(
+            !names.contains(&"TodoWrite".to_string()),
+            "the two modes are alternatives, not additive: {names:?}"
+        );
+        assert!(
+            has_checklist_store,
+            "graph mode still needs a plan source so the UI and reminders keep working"
+        );
+    }
+
+    #[test]
+    fn list_mode_does_not_register_the_task_family() {
+        let (names, _) = registered_todo(test_config());
+        for tool in ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"] {
+            assert!(
+                !names.contains(&tool.to_string()),
+                "{tool} leaked into list mode: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_disabled_todo_section_registers_nothing_in_graph_mode_either() {
+        let mut config = test_config();
+        config.todo.mode = agentrs_config::todo::TodoMode::Graph;
+        config.todo.enabled = false;
+
+        let (names, _) = registered_todo(config);
+        assert!(names.is_empty(), "got {names:?}");
     }
 
     // --- Web tool registration (TC-1.6-06, TC-2.3-01 through TC-2.3-05) ---

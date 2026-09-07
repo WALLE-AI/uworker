@@ -11,7 +11,8 @@ The agent includes a core local tool suite and agent-level helpers. The LLM auto
 | **Grep** | Regex search file contents (via ripgrep) | Yes |
 | **Glob** | Find files by pattern matching | Yes |
 | **ViewImage** | Load a local JPEG, PNG, GIF, or WebP image for model inspection | Yes |
-| **TodoWrite** | Maintain the session task checklist | No |
+| **TodoWrite** | Maintain the session task checklist (list mode) | No |
+| **TaskCreate** / **TaskList** / **TaskGet** / **TaskUpdate** | Maintain a task graph with dependencies (graph mode) | Reads only |
 | **WebFetch** | Fetch a URL, convert it to Markdown, and answer a prompt about it | Yes |
 | **WebSearch** | Search the web through a configured provider | Yes |
 | **Spawn** | Spawn sub-agents for parallel tasks | No |
@@ -91,7 +92,8 @@ If the tool goes unused for `reminder_turns` assistant turns, the engine injects
 
 ```toml
 [todo]
-enabled = true                      # register the tool at all
+enabled = true                      # register task tracking at all
+mode = "list"                       # "list" (TodoWrite) or "graph" (Task* tools)
 allow_parallel_in_progress = false  # allow several in_progress tasks at once
 reminder_turns = 10                 # turns without a call before nudging; 0 disables
 ```
@@ -99,6 +101,29 @@ reminder_turns = 10                 # turns without a call before nudging; 0 dis
 `allow_parallel_in_progress` drives both the validation and the wording of the tool description, so the instructions the model reads always match the rule it is judged against. Sub-agents spawned via **Spawn** get their own `TodoWrite` backed by their own store, so a sub-agent plans and tracks its own multi-step work without any way to observe or overwrite the checklist that spawned it. A fork override that narrows the child's tools can take `TodoWrite` away like any other tool.
 
 Changes to the checklist are published to the UI: the TUI shows a live panel above the composer and names the active task in its status line (using `activeForm` when present), and `/todos` prints the full list. Hosts on the JSON stream protocol receive a [`todo_updated`](json-stream-protocol.md#114-todo_updated) event carrying the whole list.
+
+## TaskCreate / TaskList / TaskGet / TaskUpdate
+
+The task **graph**, selected with `mode = "graph"` under `[todo]`. It replaces `TodoWrite` rather than supplementing it — the two modes are alternatives, and only one family is ever registered.
+
+Reach for it when steps genuinely depend on each other. It costs four tool descriptions instead of one, so work that merely runs in order is better served by the flat checklist.
+
+- **TaskCreate** adds tasks and returns the ids used by every later call. Each has a `subject` (imperative), optional `description`, `activeForm`, `owner`, and `blockedBy`. A task may name a sibling created earlier in the same call.
+- **TaskList** returns the graph, optionally filtered by `status` or `owner`.
+- **TaskGet** returns one task including both sides of its dependencies.
+- **TaskUpdate** changes one task, or removes it with `delete: true`. Dependencies are edited with `addBlockedBy` / `removeBlockedBy`.
+
+The store enforces what a schema cannot:
+
+- Starting or completing a task is refused while an unfinished task still blocks it. The error names the blockers and points at `removeBlockedBy`. A blocked task may always be left `pending`.
+- Dependency edges are mirrored: recording that A blocks B updates both sides, and deleting a task strips every edge naming it, so no task is left waiting on something that no longer exists.
+- A dependency that would make a task wait on itself is refused, and the error prints the loop it would have closed. A diamond — two branches converging — is not a loop and is allowed.
+- Status is judged against the graph the call *leaves behind*, so dropping a dependency and starting the task in one call works.
+- Ids are never reused after a delete, since a recycled id would silently re-point anything still naming it.
+
+Tasks live in `.agentrs/tasks/tasks.json` under the workspace, and every write is a read-modify-write under an exclusive lock on that file. They are durable across sessions and are **not** rebuilt from the conversation or mirrored into the session file — `TaskList` is how the model re-reads its own state. Unlike the flat checklist, a completed graph is never retired automatically: tasks are addressable by id, so dropping one behind the model's back would strand every dependency naming it.
+
+Graph mode drives the same UI as list mode. Tasks reach the TUI panel and the `todo_updated` protocol event with their id prefixed to the subject (`#2 Build it`), so a "blocked by 1" message can be followed to the task it names.
 
 ## WebFetch
 

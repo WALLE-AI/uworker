@@ -87,3 +87,22 @@ fn todo_write_does_not_disturb_the_web_hints() {
         "an unregistered TodoWrite must not make the web tools look configured: {hint}"
     );
 }
+
+#[test]
+fn a_missing_task_tool_explains_that_graph_mode_is_opt_in() {
+    for name in ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"] {
+        let hint = missing_tool_hint(name, registered(&["TodoWrite"])).expect("a hint");
+        assert!(hint.contains("graph"), "{name} got: {hint}");
+        assert!(hint.contains("TodoWrite"), "{name} should be redirected: {hint}");
+        assert!(!hint.contains("[web"), "{name} must not inherit the web hints: {hint}");
+    }
+}
+
+// The two modes are alternatives, so a model reaching for the wrong family
+// needs to be pointed at the other one, not just told about an on/off switch.
+#[test]
+fn the_todo_write_hint_mentions_the_graph_alternative() {
+    let hint = missing_tool_hint("TodoWrite", registered(&["TaskList"])).expect("a hint");
+    assert!(hint.contains("TaskCreate"), "got: {hint}");
+    assert!(hint.contains("graph"), "got: {hint}");
+}

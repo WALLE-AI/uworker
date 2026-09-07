@@ -9,7 +9,9 @@ mod prompt;
 mod store;
 mod tools;
 
-pub use model::{Task, TaskStatus};
+// `TaskStore`'s public methods take these, so a caller outside the crate
+// cannot use the store without them.
+pub use model::{Task, TaskDraft, TaskError, TaskPatch, TaskStatus, to_snapshots};
 pub use store::{TaskStore, task_dir};
 pub use tools::{
     TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME, TaskCreateTool, TaskGetTool,

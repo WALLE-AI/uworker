@@ -19,6 +19,7 @@ pub mod spawn_tool;
 pub mod spawner;
 mod stream;
 pub mod summarizer;
+mod task_tools;
 mod todo_reminder;
 mod tool_call;
 pub mod tool_policy;

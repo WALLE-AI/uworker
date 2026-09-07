@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use agentrs_config::config::{Config, McpServerConfig};
 use agentrs_config::shell::{ResolvedShell, resolve_shell_config};
+use agentrs_config::todo::TodoMode;
 use agentrs_mcp::manager::McpManager;
 use agentrs_mcp::tool_proxy::register_mcp_tools;
 use agentrs_memory::paths::{ENTRYPOINT_NAME, auto_memory_dir};
@@ -19,6 +20,7 @@ use agentrs_tools::glob::GlobTool;
 use agentrs_tools::grep::GrepTool;
 use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
+use agentrs_tools::task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskStore, TaskUpdateTool, task_dir};
 use agentrs_tools::todo::{TodoStore, TodoWriteTool};
 use agentrs_tools::tool_search::ToolSearchTool;
 use agentrs_tools::view_image::ViewImageTool;
@@ -39,7 +41,7 @@ use crate::skill_tool::SkillTool;
 use crate::spawn_tool::SpawnTool;
 use crate::spawner::AgentSpawner;
 use crate::summarizer::ProviderSummarizer;
-use crate::todo_reminder::TodoRuntime;
+use crate::todo_reminder::{PlanSource, TodoRuntime};
 use crate::tool_policy::ToolPolicy;
 
 /// Result of bootstrapping an agent engine with all features initialized.
@@ -180,7 +182,7 @@ impl AgentBootstrap {
 
         self.register_agent_tools(&mut registry, &provider, &environment.workspace, skills);
         let plan_active_flag = self.register_plan_tools(&mut registry);
-        let todo_store = self.register_todo_tool(&mut registry);
+        let plan_source = self.register_task_tracking(&mut registry, &environment.workspace);
         self.register_tool_search(&mut registry);
 
         let has_mcp = mcp.has_mcp();
@@ -189,7 +191,7 @@ impl AgentBootstrap {
             provider.clone(),
             registry,
             plan_active_flag,
-            todo_store,
+            plan_source,
             environment.workspace,
             prompt_usage,
         );
@@ -416,20 +418,34 @@ impl AgentBootstrap {
         plan_active_flag
     }
 
-    /// Register `TodoWrite` and hand back the store it writes into.
+    /// Register whichever task-tracking tools the configured mode calls for,
+    /// and hand back the store the engine should read the plan from.
     ///
-    /// `None` when the tool is disabled, which is also what tells the engine
-    /// there is no checklist to persist or remind about.
-    fn register_todo_tool(&self, registry: &mut ToolRegistry) -> Option<Arc<TodoStore>> {
+    /// `None` when tracking is switched off entirely, which is also what tells
+    /// the engine there is nothing to publish or remind about.
+    fn register_task_tracking(&self, registry: &mut ToolRegistry, workspace: &Path) -> Option<PlanSource> {
         if !self.config.todo.enabled {
             return None;
         }
-        let store = Arc::new(TodoStore::new());
-        registry.register(Box::new(TodoWriteTool::new(
-            Arc::clone(&store),
-            self.config.todo.allow_parallel_in_progress,
-        )));
-        Some(store)
+
+        match self.config.todo.mode {
+            TodoMode::List => {
+                let store = Arc::new(TodoStore::new());
+                registry.register(Box::new(TodoWriteTool::new(
+                    Arc::clone(&store),
+                    self.config.todo.allow_parallel_in_progress,
+                )));
+                Some(PlanSource::List(store))
+            }
+            TodoMode::Graph => {
+                let store = Arc::new(TaskStore::new(task_dir(workspace)));
+                registry.register(Box::new(TaskCreateTool::new(Arc::clone(&store))));
+                registry.register(Box::new(TaskListTool::new(Arc::clone(&store))));
+                registry.register(Box::new(TaskGetTool::new(Arc::clone(&store))));
+                registry.register(Box::new(TaskUpdateTool::new(Arc::clone(&store))));
+                Some(PlanSource::Graph(store))
+            }
+        }
     }
 
     fn register_tool_search(&self, registry: &mut ToolRegistry) {
@@ -442,7 +458,7 @@ impl AgentBootstrap {
         provider: Arc<dyn LlmProvider>,
         registry: ToolRegistry,
         plan_active_flag: Arc<AtomicBool>,
-        todo_store: Option<Arc<TodoStore>>,
+        plan_source: Option<PlanSource>,
         workspace: PathBuf,
         prompt_usage: PromptUsage,
     ) -> AgentEngine {
@@ -462,8 +478,8 @@ impl AgentBootstrap {
             AgentEngine::new_with_provider_and_env(provider, self.config, registry, self.output, workspace, runtime_env)
         };
         engine.set_plan_active_flag(plan_active_flag);
-        if let Some(store) = todo_store {
-            engine.set_todo_runtime(TodoRuntime::new(store, reminder_turns));
+        if let Some(source) = plan_source {
+            engine.set_todo_runtime(TodoRuntime::new(source, reminder_turns));
         }
         engine.set_tool_policy(self.tool_policy);
         engine.set_prompt_usage(prompt_usage);

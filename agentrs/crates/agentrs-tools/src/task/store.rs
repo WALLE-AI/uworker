@@ -316,7 +316,9 @@ fn dependency_cycle(state: &TaskFile, id: &str, blocker: &str) -> Option<String>
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
-    value.map(|text| text.trim().to_string()).filter(|text| !text.is_empty())
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn read_state(handle: &mut File) -> Result<TaskFile, TaskError> {

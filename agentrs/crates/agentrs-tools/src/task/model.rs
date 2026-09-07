@@ -1,3 +1,4 @@
+use agentrs_protocol::events::TodoSnapshot;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -53,6 +54,27 @@ impl Task {
     pub fn display_active(&self) -> &str {
         self.active_form.as_deref().unwrap_or(&self.subject)
     }
+}
+
+/// The wire form of one task.
+///
+/// Tasks and checklist entries reach the UI through the same shape, so the
+/// panel and the protocol event work in either mode. Dependency edges are
+/// dropped: the id prefix on the subject is what a reader needs to follow a
+/// blocked-by message, and the full graph is a `TaskGet` away.
+impl From<&Task> for TodoSnapshot {
+    fn from(task: &Task) -> Self {
+        Self {
+            content: format!("#{} {}", task.id, task.subject),
+            status: task.status.as_str().to_string(),
+            active_form: task.active_form.as_ref().map(|form| format!("#{} {}", task.id, form)),
+        }
+    }
+}
+
+/// Snapshot a whole graph for publication.
+pub fn to_snapshots(tasks: &[Task]) -> Vec<TodoSnapshot> {
+    tasks.iter().map(TodoSnapshot::from).collect()
 }
 
 /// A task as the model asks for it, before the store assigns an id.

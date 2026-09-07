@@ -43,7 +43,11 @@ async fn create_reports_the_ids_the_model_will_need() {
 
     assert!(!result.is_error, "{}", result.content);
     assert!(result.content.contains("Created 2 task(s)"), "{}", result.content);
-    assert!(result.content.contains("#1 [pending] Design the API"), "{}", result.content);
+    assert!(
+        result.content.contains("#1 [pending] Design the API"),
+        "{}",
+        result.content
+    );
     assert!(result.content.contains("blocked by: 1"), "{}", result.content);
 }
 
@@ -75,7 +79,9 @@ async fn list_filters_by_status_and_owner() {
             ]
         }))
         .await;
-    f.update.execute(json!({ "taskId": "1", "status": "in_progress" })).await;
+    f.update
+        .execute(json!({ "taskId": "1", "status": "in_progress" }))
+        .await;
 
     let by_owner = f.list.execute(json!({ "owner": "alice" })).await;
     assert!(by_owner.content.contains("Mine"));
@@ -122,7 +128,11 @@ async fn get_points_an_unknown_id_at_the_list() {
     let result = f.get.execute(json!({ "taskId": "9" })).await;
 
     assert!(result.is_error);
-    assert!(result.content.contains("TaskList"), "the model needs a way out: {}", result.content);
+    assert!(
+        result.content.contains("TaskList"),
+        "the model needs a way out: {}",
+        result.content
+    );
 }
 
 #[tokio::test]
@@ -134,7 +144,10 @@ async fn update_refuses_to_start_a_blocked_task() {
         }))
         .await;
 
-    let result = f.update.execute(json!({ "taskId": "2", "status": "in_progress" })).await;
+    let result = f
+        .update
+        .execute(json!({ "taskId": "2", "status": "in_progress" }))
+        .await;
     assert!(result.is_error);
     assert!(result.content.contains("blocked by 1"), "{}", result.content);
     assert!(

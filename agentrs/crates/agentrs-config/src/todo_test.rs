@@ -51,6 +51,7 @@ fn zero_reminder_turns_is_accepted_as_the_off_switch() {
 fn round_trips_through_toml() {
     let original = TodoConfig {
         enabled: true,
+        mode: TodoMode::List,
         allow_parallel_in_progress: true,
         reminder_turns: 7,
     };
