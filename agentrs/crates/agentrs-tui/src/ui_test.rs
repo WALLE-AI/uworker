@@ -1450,3 +1450,93 @@ fn the_footer_stays_anonymous_when_idle() {
     assert!(footer.contains("ready"), "got: {footer}");
     assert!(!footer.contains("Running the test suite"), "got: {footer}");
 }
+
+/// The TUI renders into an inline viewport (see `INLINE_VIEWPORT_HEIGHT`), not
+/// the whole terminal. Rendering the panel at 40 rows proves almost nothing
+/// about how it behaves in the ~12 rows it actually gets.
+const REAL_VIEWPORT_HEIGHT: u16 = 12;
+
+fn render_at_viewport_height(todos: Vec<TodoSnapshot>, height: u16) -> String {
+    let mut state = AppState::new(
+        "model".to_string(),
+        "provider".to_string(),
+        "/workspace".to_string(),
+        true,
+    );
+    state.handle_agent_event(AgentEvent::TodoUpdated(todos));
+
+    let backend = TestBackend::new(120, height);
+    let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+    terminal
+        .draw(|frame| render(frame, &state))
+        .expect("render should succeed");
+    terminal.backend().to_string()
+}
+
+fn numbered_todos(count: usize) -> Vec<TodoSnapshot> {
+    (0..count)
+        .map(|index| todo(&format!("Task number {index}"), "pending", None))
+        .collect()
+}
+
+#[test]
+fn the_hidden_count_survives_the_real_viewport() {
+    // Regression: the panel used to ask for 8 rows when the chrome had already
+    // claimed most of a 12-row frame. The layout shaved the overflow off the
+    // end, silently dropping the one line that says the list continues.
+    let rendered = render_at_viewport_height(numbered_todos(9), REAL_VIEWPORT_HEIGHT);
+
+    assert!(rendered.contains("Tasks 0/9"), "panel header missing:\n{rendered}");
+    assert!(
+        rendered.contains("more"),
+        "the hidden-entry count must never be the row that gets dropped:\n{rendered}"
+    );
+}
+
+#[test]
+fn the_hidden_count_is_truthful_at_every_viewport_height() {
+    // Whatever the panel shows plus whatever it says is hidden must add up to
+    // the real total, or the reader is being told a number that isn't true.
+    for height in 8..=24u16 {
+        let rendered = render_at_viewport_height(numbered_todos(9), height);
+        if !rendered.contains("Tasks 0/9") {
+            continue; // too short for the panel at all
+        }
+
+        let visible = (0..9)
+            .filter(|index| rendered.contains(&format!("Task number {index}")))
+            .count();
+        let claimed_hidden = rendered
+            .split_once("… ")
+            .and_then(|(_, tail)| tail.split_whitespace().next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        assert_eq!(
+            visible + claimed_hidden,
+            9,
+            "at height {height} the panel showed {visible} and claimed {claimed_hidden} hidden:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn a_short_list_needs_no_hidden_count() {
+    let rendered = render_at_viewport_height(numbered_todos(3), REAL_VIEWPORT_HEIGHT);
+
+    assert!(rendered.contains("Task number 2"), "got:\n{rendered}");
+    assert!(
+        !rendered.contains("more"),
+        "nothing is hidden, so nothing should claim to be:\n{rendered}"
+    );
+}
+
+#[test]
+fn the_panel_never_crowds_out_the_composer() {
+    // The composer and footer are how the user types and reads state; the
+    // checklist must yield to them, not the other way round.
+    let rendered = render_at_viewport_height(numbered_todos(20), REAL_VIEWPORT_HEIGHT);
+
+    assert!(rendered.contains("Type a message"), "composer gone:\n{rendered}");
+    assert!(rendered.contains("AgentrsCLI ·"), "footer gone:\n{rendered}");
+}

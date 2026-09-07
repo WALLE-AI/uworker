@@ -3314,7 +3314,10 @@ mod tests_todo {
             ),
         ];
 
-        engine.set_todo_runtime(TodoRuntime::new(PlanSource::List(Arc::new(TodoStore::new())), REMINDER_TURNS));
+        engine.set_todo_runtime(TodoRuntime::new(
+            PlanSource::List(Arc::new(TodoStore::new())),
+            REMINDER_TURNS,
+        ));
 
         let published = updates(&output);
         assert_eq!(published.len(), 1, "a resumed session must repaint what it restored");

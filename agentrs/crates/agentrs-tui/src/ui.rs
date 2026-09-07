@@ -73,11 +73,9 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &AppState) {
         .composer
         .visual_height(composer_width, MAX_COMPOSER_HEIGHT)
         .saturating_add(1);
-    let todo_height = todo_panel_height(state);
-    let reserved_height = composer_height
-        .saturating_add(1)
-        .saturating_add(FOOTER_HEIGHT)
-        .saturating_add(todo_height);
+    let chrome_height = composer_height.saturating_add(1).saturating_add(FOOTER_HEIGHT);
+    let todo_height = todo_panel_height(state, content.height.saturating_sub(chrome_height));
+    let reserved_height = chrome_height.saturating_add(todo_height);
     let max_transcript_height = content.height.saturating_sub(reserved_height);
     let transcript_height = desired_transcript_height(state, content.width, max_transcript_height);
     let chunks = Layout::default()
@@ -104,16 +102,23 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &AppState) {
     }
 }
 
-/// Rows the checklist panel needs: a header plus one row per shown entry, or
-/// nothing at all when there is no checklist.
-fn todo_panel_height(state: &AppState) -> u16 {
+/// Rows the checklist panel takes: a header plus one row per shown entry and,
+/// when entries are hidden, one more for the count of them. Zero without a
+/// checklist.
+///
+/// Capped at `available`. The frame is an inline viewport a dozen-odd rows
+/// tall, not the whole terminal, so a panel that asked for more than the
+/// chrome left behind would be silently shaved by the layout solver — and the
+/// row it loses is the last one, which is exactly the "N more" line.
+fn todo_panel_height(state: &AppState, available: u16) -> u16 {
     if state.todos.is_empty() {
         return 0;
     }
     let shown = state.todos.len().min(MAX_VISIBLE_TODOS);
     let elided = usize::from(state.todos.len() > MAX_VISIBLE_TODOS);
     // header + entries + optional "N more" line
-    (1 + shown + elided).min(u16::MAX as usize) as u16
+    let wanted = (1 + shown + elided).min(u16::MAX as usize) as u16;
+    wanted.min(available)
 }
 
 fn render_todo_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -127,7 +132,18 @@ fn render_todo_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         muted(state),
     ))];
 
-    for todo in state.todos.iter().take(MAX_VISIBLE_TODOS) {
+    // Fit the rows actually granted, not the rows requested. When the two
+    // differ, the count of hidden entries is the line that must survive: it is
+    // the only thing telling the reader the list goes on.
+    let body = area.height.saturating_sub(1) as usize;
+    let shown = if state.todos.len() <= body.min(MAX_VISIBLE_TODOS) {
+        state.todos.len()
+    } else {
+        // One body row goes to the "N more" line, so the entries get the rest.
+        body.saturating_sub(1).min(MAX_VISIBLE_TODOS)
+    };
+
+    for todo in state.todos.iter().take(shown) {
         let (marker, style) = match todo.status.as_str() {
             "completed" => ("✓", muted(state)),
             "in_progress" => ("▸", color(state, Color::Cyan)),
@@ -147,9 +163,9 @@ fn render_todo_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ]));
     }
 
-    if state.todos.len() > MAX_VISIBLE_TODOS {
+    if state.todos.len() > shown {
         lines.push(Line::from(Span::styled(
-            format!("  … {} more", state.todos.len() - MAX_VISIBLE_TODOS),
+            format!("  … {} more", state.todos.len() - shown),
             muted(state),
         )));
     }
