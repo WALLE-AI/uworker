@@ -20,7 +20,7 @@ fn item(content: &str, status: TodoStatus) -> TodoItem {
 
 fn runtime(reminder_turns: usize) -> (TodoRuntime, Arc<TodoStore>) {
     let store = Arc::new(TodoStore::new());
-    (TodoRuntime::for_list(Arc::clone(&store), reminder_turns), store)
+    (TodoRuntime::new(PlanSource::List(Arc::clone(&store)), reminder_turns), store)
 }
 
 fn todo_write_call() -> Vec<ContentBlock> {

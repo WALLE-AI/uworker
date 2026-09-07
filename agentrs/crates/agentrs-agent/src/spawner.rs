@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use agentrs_config::config::Config;
+use agentrs_config::todo::TodoMode;
 use agentrs_providers::LlmProvider;
 use agentrs_tools::edit::EditTool;
 use agentrs_tools::exec_command::ExecCommandTool;
@@ -11,6 +12,7 @@ use agentrs_tools::glob::GlobTool;
 use agentrs_tools::grep::GrepTool;
 use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
+use agentrs_tools::task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskStore, TaskUpdateTool, task_dir};
 use agentrs_tools::todo::{TodoStore, TodoWriteTool};
 use agentrs_tools::write::WriteTool;
 use agentrs_types::message::TokenUsage;
@@ -18,7 +20,7 @@ use agentrs_types::message::TokenUsage;
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::output::null_sink::NullSink;
-use crate::todo_reminder::TodoRuntime;
+use crate::todo_reminder::{PlanSource, TodoRuntime};
 use crate::tool_policy::ToolPolicy;
 
 // Re-export from agentrs-types — single source of truth
@@ -77,7 +79,7 @@ impl AgentSpawner {
 
         let reminder_turns = config.todo.reminder_turns;
         let child_policy = effective_child_tool_policy(&self.tool_policy, &[]);
-        let (tools, todo_store) = build_tool_registry(&child_policy, &config, &self.cwd, &self.runtime_env);
+        let (tools, plan_source) = build_tool_registry(&child_policy, &config, &self.cwd, &self.runtime_env);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider_and_env(
             self.provider.clone(),
@@ -88,8 +90,8 @@ impl AgentSpawner {
             self.runtime_env.clone(),
         );
         engine.set_tool_policy(child_policy);
-        if let Some(store) = todo_store {
-            engine.set_todo_runtime(TodoRuntime::for_list(store, reminder_turns));
+        if let Some(source) = plan_source {
+            engine.set_todo_runtime(TodoRuntime::new(source, reminder_turns));
         }
 
         match engine.run(&sub_config.prompt, "").await {
@@ -164,7 +166,7 @@ impl Spawner for AgentSpawner {
 
         let reminder_turns = config.todo.reminder_turns;
         let child_policy = effective_child_tool_policy(&self.tool_policy, &overrides.allowed_tools);
-        let (tools, todo_store) = build_tool_registry(&child_policy, &config, &self.cwd, &self.runtime_env);
+        let (tools, plan_source) = build_tool_registry(&child_policy, &config, &self.cwd, &self.runtime_env);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider_and_env(
             self.provider.clone(),
@@ -176,8 +178,8 @@ impl Spawner for AgentSpawner {
         );
         engine.set_initial_reasoning_effort(overrides.effort.clone());
         engine.set_tool_policy(child_policy);
-        if let Some(store) = todo_store {
-            engine.set_todo_runtime(TodoRuntime::for_list(store, reminder_turns));
+        if let Some(source) = plan_source {
+            engine.set_todo_runtime(TodoRuntime::new(source, reminder_turns));
         }
 
         match engine.run(&sub_config.prompt, "").await {
@@ -212,17 +214,24 @@ fn effective_child_tool_policy(parent: &ToolPolicy, allowed_tools: &[String]) ->
     )
 }
 
-/// Assemble a sub-agent's tools, and the checklist store if it gets one.
+/// Assemble a sub-agent's tools, and the plan store if it gets one.
 ///
-/// The store is created here rather than shared with the parent: a sub-agent
-/// runs its own engine, so it plans and tracks its own work without any way to
-/// observe or overwrite the checklist that spawned it.
+/// The child follows the workspace's configured mode rather than always getting
+/// the flat checklist, so a graph-mode deployment never sees `TodoWrite`
+/// reappear inside a sub-agent.
+///
+/// The two modes differ in what the child shares. A list-mode child gets its
+/// own in-memory checklist and plans in private. A graph-mode child is pointed
+/// at the same on-disk graph as its parent, which is the point of making the
+/// store file-backed and lockable in the first place: tasks are addressable by
+/// id and carry an `owner`, so a child can claim work the parent planned
+/// instead of inventing a private copy the parent can never see.
 fn build_tool_registry(
     policy: &ToolPolicy,
     config: &Config,
     cwd: &Path,
     runtime_env: &[(String, String)],
-) -> (ToolRegistry, Option<Arc<TodoStore>>) {
+) -> (ToolRegistry, Option<PlanSource>) {
     let all_tools: Vec<(&str, Box<dyn agentrs_tools::Tool>)> = vec![
         ("Read", Box::new(ReadTool::new(None))),
         ("Write", Box::new(WriteTool::new(None))),
@@ -242,16 +251,57 @@ fn build_tool_registry(
         }
     }
 
-    let todo_store = (config.todo.enabled && policy.allows("TodoWrite")).then(|| {
-        let store = Arc::new(TodoStore::new());
-        registry.register(Box::new(TodoWriteTool::new(
-            Arc::clone(&store),
-            config.todo.allow_parallel_in_progress,
-        )));
-        store
-    });
+    let plan_source = build_task_tracking(&mut registry, policy, config, cwd);
 
-    (registry, todo_store)
+    (registry, plan_source)
+}
+
+/// Register the child's tracking tools, honouring both the configured mode and
+/// any fork override that narrowed the child's tool set.
+fn build_task_tracking(
+    registry: &mut ToolRegistry,
+    policy: &ToolPolicy,
+    config: &Config,
+    cwd: &Path,
+) -> Option<PlanSource> {
+    if !config.todo.enabled {
+        return None;
+    }
+
+    match config.todo.mode {
+        TodoMode::List => {
+            if !policy.allows("TodoWrite") {
+                return None;
+            }
+            let store = Arc::new(TodoStore::new());
+            registry.register(Box::new(TodoWriteTool::new(
+                Arc::clone(&store),
+                config.todo.allow_parallel_in_progress,
+            )));
+            Some(PlanSource::List(store))
+        }
+        TodoMode::Graph => {
+            let store = Arc::new(TaskStore::new(task_dir(cwd)));
+            let mut registered = false;
+            if policy.allows("TaskCreate") {
+                registry.register(Box::new(TaskCreateTool::new(Arc::clone(&store))));
+                registered = true;
+            }
+            if policy.allows("TaskList") {
+                registry.register(Box::new(TaskListTool::new(Arc::clone(&store))));
+                registered = true;
+            }
+            if policy.allows("TaskGet") {
+                registry.register(Box::new(TaskGetTool::new(Arc::clone(&store))));
+                registered = true;
+            }
+            if policy.allows("TaskUpdate") {
+                registry.register(Box::new(TaskUpdateTool::new(Arc::clone(&store))));
+                registered = true;
+            }
+            registered.then_some(PlanSource::Graph(store))
+        }
+    }
 }
 
 #[cfg(test)]

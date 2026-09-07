@@ -86,11 +86,6 @@ impl TodoRuntime {
         }
     }
 
-    /// Shorthand for the flat-checklist mode.
-    pub(crate) fn for_list(store: Arc<TodoStore>, reminder_turns: usize) -> Self {
-        Self::new(PlanSource::List(store), reminder_turns)
-    }
-
     /// The checklist items, when the flat mode is active.
     ///
     /// Graph tasks live on disk and are not mirrored into the session file, so

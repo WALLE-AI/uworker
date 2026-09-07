@@ -2998,7 +2998,7 @@ mod tests_todo {
     use crate::engine::AgentEngine;
     use crate::output::OutputSink;
     use crate::plan::state::PlanState;
-    use crate::todo_reminder::TodoRuntime;
+    use crate::todo_reminder::{PlanSource, TodoRuntime};
     use crate::turn::TurnKind;
 
     const REMINDER_TURNS: usize = 10;
@@ -3082,7 +3082,7 @@ mod tests_todo {
     fn engine_with_todo(reminder_turns: usize) -> (AgentEngine, Arc<TodoStore>) {
         let mut engine = make_engine();
         let store = Arc::new(TodoStore::new());
-        engine.set_todo_runtime(TodoRuntime::for_list(Arc::clone(&store), reminder_turns));
+        engine.set_todo_runtime(TodoRuntime::new(PlanSource::List(Arc::clone(&store)), reminder_turns));
         (engine, store)
     }
 
@@ -3194,7 +3194,7 @@ mod tests_todo {
         ];
 
         let store = Arc::new(TodoStore::new());
-        engine.set_todo_runtime(TodoRuntime::for_list(Arc::clone(&store), REMINDER_TURNS));
+        engine.set_todo_runtime(TodoRuntime::new(PlanSource::List(Arc::clone(&store)), REMINDER_TURNS));
 
         let snapshot = store.snapshot();
         assert_eq!(snapshot.len(), 1, "resume must restore the checklist");
@@ -3239,7 +3239,7 @@ mod tests_todo {
         let output = Arc::new(RecordingOutput::default());
         let mut engine = make_engine_with_output(output.clone());
         let store = Arc::new(TodoStore::new());
-        engine.set_todo_runtime(TodoRuntime::for_list(Arc::clone(&store), REMINDER_TURNS));
+        engine.set_todo_runtime(TodoRuntime::new(PlanSource::List(Arc::clone(&store)), REMINDER_TURNS));
         (engine, output, store)
     }
 
@@ -3314,7 +3314,7 @@ mod tests_todo {
             ),
         ];
 
-        engine.set_todo_runtime(TodoRuntime::for_list(Arc::new(TodoStore::new()), REMINDER_TURNS));
+        engine.set_todo_runtime(TodoRuntime::new(PlanSource::List(Arc::new(TodoStore::new())), REMINDER_TURNS));
 
         let published = updates(&output);
         assert_eq!(published.len(), 1, "a resumed session must repaint what it restored");

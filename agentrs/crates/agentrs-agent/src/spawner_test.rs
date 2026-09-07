@@ -144,23 +144,94 @@ mod tests_todo_isolation {
 
     #[test]
     fn a_sub_agent_gets_its_own_checklist() {
-        let (registry, store) = super::build_tool_registry(&ToolPolicy::default(), &config(), Path::new("/tmp"), &[]);
+        let (registry, source) = super::build_tool_registry(&ToolPolicy::default(), &config(), Path::new("/tmp"), &[]);
 
         assert!(registry.tool_names().contains(&"TodoWrite".to_string()));
-        assert!(store.is_some(), "the engine needs the store to drive reminders");
+        assert!(source.is_some(), "the engine needs the store to drive reminders");
+    }
+
+    // A graph-mode workspace must not see the flat checklist reappear inside a
+    // sub-agent: TodoWrite is not a tool that deployment selected.
+    #[test]
+    fn a_graph_mode_sub_agent_gets_the_task_tools_instead() {
+        let mut config = config();
+        config.todo.mode = agentrs_config::todo::TodoMode::Graph;
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+
+        let (registry, source) = super::build_tool_registry(&ToolPolicy::default(), &config, workspace.path(), &[]);
+        let names = registry.tool_names();
+
+        for tool in ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"] {
+            assert!(names.contains(&tool.to_string()), "{tool} missing from {names:?}");
+        }
+        assert!(!names.contains(&"TodoWrite".to_string()), "got {names:?}");
+        assert!(source.is_some());
+    }
+
+    // The graph is file-backed and lockable precisely so a child can claim work
+    // the parent planned, rather than keeping a private copy the parent cannot
+    // see. Same workspace means the same graph.
+    #[test]
+    fn a_graph_mode_sub_agent_shares_the_workspace_graph() {
+        let mut config = config();
+        config.todo.mode = agentrs_config::todo::TodoMode::Graph;
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+
+        let parent = agentrs_tools::task::TaskStore::new(agentrs_tools::task::task_dir(workspace.path()));
+        parent
+            .create(vec![agentrs_tools::task::TaskDraft {
+                subject: "planned by the parent".to_string(),
+                description: String::new(),
+                active_form: None,
+                owner: None,
+                blocked_by: Vec::new(),
+            }])
+            .expect("create");
+
+        let (registry, _) = super::build_tool_registry(&ToolPolicy::default(), &config, workspace.path(), &[]);
+        let listed = futures::executor::block_on(
+            registry
+                .get("TaskList")
+                .expect("TaskList registered")
+                .execute(serde_json::json!({})),
+        );
+
+        assert!(
+            listed.content.contains("planned by the parent"),
+            "the child must see the parent's graph: {}",
+            listed.content
+        );
+    }
+
+    #[test]
+    fn a_policy_that_denies_the_task_tools_leaves_a_graph_child_untracked() {
+        let mut config = config();
+        config.todo.mode = agentrs_config::todo::TodoMode::Graph;
+        let policy = ToolPolicy::allow_only(["Read"]);
+
+        let (registry, source) = super::build_tool_registry(&policy, &config, Path::new("/tmp"), &[]);
+        assert!(!registry.tool_names().iter().any(|name| name.starts_with("Task")));
+        assert!(source.is_none());
     }
 
     // Each sub-agent runs its own engine and so builds its own store. Nothing
     // is shared with the parent, which is what makes the isolation structural
     // rather than something a key space has to get right.
+    // Each sub-agent runs its own engine and so builds its own store. In list
+    // mode nothing is shared with the parent, which is what makes the isolation
+    // structural rather than something a key space has to get right.
     #[test]
-    fn two_sub_agents_do_not_share_a_checklist() {
+    fn two_list_mode_sub_agents_do_not_share_a_checklist() {
         let config = config();
         let (_, first) = super::build_tool_registry(&ToolPolicy::default(), &config, Path::new("/tmp"), &[]);
         let (_, second) = super::build_tool_registry(&ToolPolicy::default(), &config, Path::new("/tmp"), &[]);
 
-        let first = first.expect("store");
-        let second = second.expect("store");
+        let (crate::todo_reminder::PlanSource::List(first), crate::todo_reminder::PlanSource::List(second)) =
+            (first.expect("store"), second.expect("store"))
+        else {
+            panic!("the default mode should hand back flat checklists");
+        };
+
         first.replace(vec![agentrs_tools::todo::TodoItem {
             content: "first agent task".to_string(),
             status: agentrs_tools::todo::TodoStatus::InProgress,

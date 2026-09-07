@@ -98,7 +98,7 @@ allow_parallel_in_progress = false  # allow several in_progress tasks at once
 reminder_turns = 10                 # turns without a call before nudging; 0 disables
 ```
 
-`allow_parallel_in_progress` drives both the validation and the wording of the tool description, so the instructions the model reads always match the rule it is judged against. Sub-agents spawned via **Spawn** get their own `TodoWrite` backed by their own store, so a sub-agent plans and tracks its own multi-step work without any way to observe or overwrite the checklist that spawned it. A fork override that narrows the child's tools can take `TodoWrite` away like any other tool.
+`allow_parallel_in_progress` drives both the validation and the wording of the tool description, so the instructions the model reads always match the rule it is judged against. Sub-agents spawned via **Spawn** get their own `TodoWrite` backed by their own store, so a sub-agent plans and tracks its own multi-step work without any way to observe or overwrite the checklist that spawned it. A fork override that narrows the child's tools can take `TodoWrite` away like any other tool. (In graph mode the child shares the workspace graph instead — see below.)
 
 Changes to the checklist are published to the UI: the TUI shows a live panel above the composer and names the active task in its status line (using `activeForm` when present), and `/todos` prints the full list. Hosts on the JSON stream protocol receive a [`todo_updated`](json-stream-protocol.md#114-todo_updated) event carrying the whole list.
 
@@ -122,6 +122,8 @@ The store enforces what a schema cannot:
 - Ids are never reused after a delete, since a recycled id would silently re-point anything still naming it.
 
 Tasks live in `.agentrs/tasks/tasks.json` under the workspace, and every write is a read-modify-write under an exclusive lock on that file. They are durable across sessions and are **not** rebuilt from the conversation or mirrored into the session file — `TaskList` is how the model re-reads its own state. Unlike the flat checklist, a completed graph is never retired automatically: tasks are addressable by id, so dropping one behind the model's back would strand every dependency naming it.
+
+Sub-agents follow the configured mode too, but share rather than isolate: a graph-mode child is pointed at the same workspace graph as its parent. That is what the file-backed, lockable store is for — tasks are addressable by id and carry an `owner`, so a child can claim work the parent planned instead of keeping a private copy the parent can never see. A fork override that denies the `Task*` tools leaves the child untracked.
 
 Graph mode drives the same UI as list mode. Tasks reach the TUI panel and the `todo_updated` protocol event with their id prefixed to the subject (`#2 Build it`), so a "blocked by 1" message can be followed to the task it names.
 

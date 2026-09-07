@@ -659,3 +659,18 @@ derive 出来的 `Default` 会让 `next_id` 从 0 开始——首个任务拿到
 **验证**：`fmt` / `clippy` 干净；全量测试失败集合仍与基线逐字节一致；
 task 模块新增 39 个测试。端到端（本地 vLLM）实测：模型一次 `TaskCreate` 建三个任务并用 `blockedBy`
 串起依赖（含引用同批次兄弟任务），双向边正确落盘，`TaskUpdate` 对被阻塞任务的拒绝信息按预期返回给模型。
+
+### 9.3 收尾自查发现的缺陷
+
+自查「是否全部完成」时发现 §9.1 引入的子 agent 清单**没有考虑 §9.2 的 mode**：
+`spawner.rs` 只判断 `todo.enabled`，于是 graph 模式的部署里子 agent 仍会拿到 `TodoWrite`——
+一个该部署没有选择、父 agent 也没有的工具。已修。
+
+修复顺带定了一个此前未明确的语义：**子 agent 跟随 workspace 的 mode，但两种模式的共享程度不同**。
+- list 模式：子 agent 自建内存清单，与父完全隔离（保持 §9.1 的行为）；
+- graph 模式：子 agent 指向**同一个** workspace 图。这正是把 store 做成文件+锁的意义——
+  任务按 id 寻址且带 `owner`，子 agent 应当能认领父 agent 规划好的任务，
+  而不是维护一份父 agent 永远看不见的私有副本。fork override 拒掉 `Task*` 时子 agent 无跟踪工具。
+
+同时删掉了 `TodoRuntime::for_list`：两个调用点改走 `PlanSource` 之后它只剩测试在用，
+按 AGENTS.md 的可见性要求不保留仅为测试存在的构造函数。
