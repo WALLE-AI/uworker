@@ -32,6 +32,9 @@ impl OpenAiResponsesProjector {
         if let Some(max_tokens) = max_tokens {
             body["max_output_tokens"] = json!(max_tokens);
         }
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = json!(temperature);
+        }
 
         let mut tool_count = 0;
         if !request.tools.is_empty() && compat.emit_tools() {

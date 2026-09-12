@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use agentrs_agent::spawner::{AgentSpawner, SubAgentConfig};
+use agentrs_agent::spawner::{AgentSpawner, SubAgentSpec};
 use agentrs_agent::tool_policy::ToolPolicy;
 use agentrs_providers::{LlmProvider, ProviderError};
 use agentrs_types::llm::{LlmEvent, LlmRequest};
@@ -10,6 +10,7 @@ use agentrs_types::message::{StopReason, TokenUsage};
 use async_trait::async_trait;
 use common::{MockLlmProvider, test_config};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 struct ToolRecordingProvider {
     tool_names: Arc<Mutex<Vec<String>>>,
@@ -37,13 +38,18 @@ impl LlmProvider for ToolRecordingProvider {
 // Helper: build a minimal SubAgentConfig for testing
 // ---------------------------------------------------------------------------
 
-fn make_sub_config(name: &str) -> SubAgentConfig {
-    SubAgentConfig {
+fn make_sub_config(name: &str) -> SubAgentSpec {
+    SubAgentSpec {
         name: name.to_string(),
+        agent_type: None,
         prompt: format!("Task for {}", name),
-        max_turns: 5,
-        max_tokens: 1024,
+        max_turns: Some(5),
+        max_tokens: Some(1024),
         system_prompt: None,
+        depth: 0,
+        resume: None,
+        persistent: false,
+        isolation: Default::default(),
     }
 }
 
@@ -60,7 +66,7 @@ async fn test_spawn_single_agent() {
     let result = spawner.spawn_one(make_sub_config("agent-1")).await;
 
     assert_eq!(result.text, "Sub-agent done");
-    assert!(!result.is_error, "expected no error, got: {}", result.text);
+    assert!(!result.status.is_error(), "expected no error, got: {}", result.text);
     assert_eq!(result.turns, 1);
     assert_eq!(result.name, "agent-1");
 }
@@ -80,7 +86,7 @@ async fn restricted_parent_policy_limits_spawned_agent_tools() {
 
     let result = spawner.spawn_one(make_sub_config("restricted-agent")).await;
 
-    assert!(!result.is_error, "expected restricted sub-agent to complete");
+    assert!(!result.status.is_error(), "expected restricted sub-agent to complete");
     assert_eq!(*tool_names.lock().unwrap(), vec!["Grep", "Read"]);
 }
 
@@ -117,15 +123,16 @@ async fn test_spawn_parallel_agents() {
         make_sub_config("agent-C"),
     ];
 
-    let results = spawner.spawn_parallel(sub_configs).await;
+    let results = spawner.spawn_parallel(sub_configs, CancellationToken::new()).await;
 
     assert_eq!(results.len(), 3, "expected 3 results from 3 sub-agents");
 
     for result in &results {
         assert!(
-            !result.is_error,
+            !result.status.is_error(),
             "sub-agent '{}' returned an error: {}",
-            result.name, result.text
+            result.name,
+            result.text
         );
     }
 
@@ -180,8 +187,8 @@ async fn test_spawn_shares_provider() {
     let result1 = spawner.spawn_one(make_sub_config("seq-1")).await;
     let result2 = spawner.spawn_one(make_sub_config("seq-2")).await;
 
-    assert!(!result1.is_error, "seq-1 errored: {}", result1.text);
-    assert!(!result2.is_error, "seq-2 errored: {}", result2.text);
+    assert!(!result1.status.is_error(), "seq-1 errored: {}", result1.text);
+    assert!(!result2.status.is_error(), "seq-2 errored: {}", result2.text);
     assert_eq!(result1.text, "first");
     assert_eq!(result2.text, "second");
 }
@@ -199,7 +206,7 @@ async fn test_spawn_agent_error_captured() {
 
     let result = spawner.spawn_one(make_sub_config("error-agent")).await;
 
-    assert!(result.is_error, "expected is_error=true");
+    assert!(result.status.is_error(), "expected an error status");
     assert!(
         result.text.to_lowercase().contains("error"),
         "expected error message to contain 'error', got: {}",

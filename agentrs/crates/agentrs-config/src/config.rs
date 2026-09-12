@@ -11,6 +11,7 @@ use crate::hooks::HooksConfig;
 use crate::logging::LoggingConfig;
 use crate::plan::PlanConfig;
 use crate::shell::ShellConfig;
+use crate::subagent::SubAgentConfig;
 use crate::todo::TodoConfig;
 use crate::tui::TuiConfig;
 use crate::web::WebConfig;
@@ -96,6 +97,9 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub session: SessionConfig,
+
+    #[serde(default)]
+    pub subagent: SubAgentConfig,
 
     #[serde(default)]
     pub compact: CompactConfig,
@@ -308,6 +312,7 @@ pub struct Config {
     pub compat: ProviderCompat,
     pub tools: ToolsConfig,
     pub session: SessionConfig,
+    pub subagent: SubAgentConfig,
     pub compact: CompactConfig,
     /// Provenance of `compact.context_window`, used to decide whether runtime
     /// model changes may safely recompute it.
@@ -503,6 +508,7 @@ impl Config {
             compat,
             tools,
             session: merged.session,
+            subagent: merged.subagent,
             compact,
             compact_context_window_source,
             plan: merged.plan,
@@ -816,6 +822,8 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         }
     };
 
+    let subagent = global.subagent.overlay(project.subagent);
+
     // Hooks: combine hooks from both configs (project hooks appended after global)
     let hooks = HooksConfig {
         pre_tool_use: [global.hooks.pre_tool_use, project.hooks.pre_tool_use].concat(),
@@ -902,6 +910,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         profiles,
         tools,
         session,
+        subagent,
         compact,
         plan,
         todo,
@@ -1197,6 +1206,19 @@ backend = "none"                 # none | duckduckgo | brave | tavily | searxng
 enabled = true
 directory = ".agentrs/sessions"  # relative to project root
 max_sessions = 20                # auto-cleanup oldest
+
+# Sub-agent runtime limits
+[subagent]
+enabled = true
+max_per_call = 5
+max_concurrent = 5
+max_turns = 200
+max_tokens = 4096
+depth = 1
+# turn_output_budget = 50000
+cancel_grace = 5000              # milliseconds
+persist_sessions = true
+builtin_agents = true
 
 # Hook system: run shell commands at tool lifecycle events
 # [[hooks.post_tool_use]]

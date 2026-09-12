@@ -11,6 +11,8 @@ pub struct LlmRequest {
     pub messages: Vec<crate::message::Message>,
     pub tools: Vec<ToolDef>,
     pub max_tokens: Option<u32>,
+    /// Optional sampling temperature. Providers omit it when unset.
+    pub temperature: Option<f32>,
     /// Optional: thinking config (Anthropic extended thinking)
     pub thinking: Option<ThinkingConfig>,
     /// Optional: reasoning effort for OpenAI reasoning models (low/medium/high)

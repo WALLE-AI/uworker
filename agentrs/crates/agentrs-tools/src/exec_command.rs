@@ -18,6 +18,7 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 pub struct ExecCommandTool {
     cwd: PathBuf,
     runtime_env: HashMap<String, String>,
+    read_only: bool,
 }
 
 impl ExecCommandTool {
@@ -25,6 +26,7 @@ impl ExecCommandTool {
         Self {
             cwd,
             runtime_env: HashMap::new(),
+            read_only: false,
         }
     }
 
@@ -32,6 +34,15 @@ impl ExecCommandTool {
         Self {
             cwd,
             runtime_env: runtime_env.into_iter().collect(),
+            read_only: false,
+        }
+    }
+
+    pub fn new_read_only_with_env(cwd: PathBuf, runtime_env: Vec<(String, String)>) -> Self {
+        Self {
+            cwd,
+            runtime_env: runtime_env.into_iter().collect(),
+            read_only: true,
         }
     }
 }
@@ -104,6 +115,14 @@ impl Tool for ExecCommandTool {
                 is_error: true,
             };
         };
+        if self.read_only
+            && let Err(reason) = validate_read_only_command(command)
+        {
+            return ToolResult {
+                content: format!("Command rejected by read-only policy: {reason}"),
+                is_error: true,
+            };
+        }
 
         let shell = match resolve_shell(input["shell"].as_str()) {
             Ok(shell) => shell,
@@ -162,6 +181,51 @@ impl Tool for ExecCommandTool {
         let cmd = input.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
         format!("Execute: {}", crate::truncate_utf8(cmd, 80))
     }
+}
+
+fn validate_read_only_command(command: &str) -> Result<(), &'static str> {
+    if command.trim().is_empty() {
+        return Err("command is empty");
+    }
+    if ['|', '>', '<', ';', '&', '\n', '\r', '`']
+        .iter()
+        .any(|character| command.contains(*character))
+        || command.contains("$(")
+        || command.contains("${")
+    {
+        return Err("shell composition, substitution, and redirection are disabled");
+    }
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    let executable = words[0].trim_matches(['\'', '"']).to_ascii_lowercase();
+    let allowed = [
+        "ls",
+        "dir",
+        "get-childitem",
+        "cat",
+        "type",
+        "get-content",
+        "head",
+        "tail",
+        "find",
+        "where",
+        "rg",
+        "grep",
+        "pwd",
+        "get-location",
+    ];
+    if allowed.contains(&executable.as_str()) {
+        return Ok(());
+    }
+    if executable == "git" {
+        let Some(subcommand) = words.get(1).map(|word| word.to_ascii_lowercase()) else {
+            return Err("git requires an approved read-only subcommand");
+        };
+        let git_allowed = ["status", "log", "diff", "show", "rev-parse", "ls-files"];
+        if git_allowed.contains(&subcommand.as_str()) {
+            return Ok(());
+        }
+    }
+    Err("executable or git subcommand is not on the read-only allowlist")
 }
 
 #[cfg(test)]

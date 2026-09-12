@@ -1,4 +1,4 @@
-use agentrs_protocol::events::TodoSnapshot;
+use agentrs_protocol::events::{SubAgentEventStatus, TodoSnapshot, Usage};
 
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
@@ -40,4 +40,10 @@ pub trait OutputSink: Send + Sync {
     /// Defaults to ignoring it: a plain terminal already sees the tool's own
     /// receipt, so only sinks that maintain a live view need to react.
     fn emit_todo_update(&self, _todos: &[TodoSnapshot]) {}
+
+    fn emit_subagent_started(&self, _id: &str, _name: &str, _parent_msg_id: &str, _depth: usize) {}
+
+    fn emit_subagent_progress(&self, _id: &str, _status: SubAgentEventStatus, _turns: usize, _usage: Usage) {}
+
+    fn emit_subagent_finished(&self, _id: &str, _status: SubAgentEventStatus, _turns: usize, _usage: Usage) {}
 }

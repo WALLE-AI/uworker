@@ -29,6 +29,7 @@ fn make_request() -> LlmRequest {
         )],
         tools: vec![],
         max_tokens: Some(512),
+        temperature: None,
         thinking: None,
         reasoning_effort: None,
     }

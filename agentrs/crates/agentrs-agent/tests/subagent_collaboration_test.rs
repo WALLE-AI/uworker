@@ -16,7 +16,7 @@ use tempfile::tempdir;
 use tokio::sync::mpsc;
 
 use agentrs_agent::spawn_tool::SpawnTool;
-use agentrs_agent::spawner::{AgentSpawner, SubAgentConfig};
+use agentrs_agent::spawner::{AgentSpawner, SubAgentSpec};
 use agentrs_agent::tool_policy::ToolPolicy;
 use agentrs_config::todo::TodoMode;
 use agentrs_providers::{LlmProvider, ProviderError};
@@ -110,13 +110,18 @@ impl LlmProvider for ScriptedProvider {
     }
 }
 
-fn sub_config(name: &str, prompt: &str) -> SubAgentConfig {
-    SubAgentConfig {
+fn sub_config(name: &str, prompt: &str) -> SubAgentSpec {
+    SubAgentSpec {
         name: name.to_string(),
+        agent_type: None,
         prompt: prompt.to_string(),
-        max_turns: 5,
-        max_tokens: 1024,
+        max_turns: Some(5),
+        max_tokens: Some(1024),
         system_prompt: None,
+        depth: 0,
+        resume: None,
+        persistent: false,
+        isolation: Default::default(),
     }
 }
 
@@ -163,7 +168,7 @@ async fn a_graph_mode_child_claims_a_task_the_parent_planned() {
     );
 
     let result = spawner.spawn_one(sub_config("worker", "claim task 1")).await;
-    assert!(!result.is_error, "child failed: {}", result.text);
+    assert!(!result.status.is_error(), "child failed: {}", result.text);
 
     let task = parent_store.get("1").expect("read graph").expect("task 1 still exists");
     assert_eq!(task.status.as_str(), "in_progress");
@@ -202,7 +207,7 @@ async fn a_list_mode_child_leaves_no_plan_behind_in_the_workspace() {
     );
 
     let result = spawner.spawn_one(sub_config("worker", "track some work")).await;
-    assert!(!result.is_error, "child failed: {}", result.text);
+    assert!(!result.status.is_error(), "child failed: {}", result.text);
 
     assert!(
         !task_dir(workspace.path()).join("tasks.json").exists(),
@@ -223,7 +228,7 @@ async fn an_unrestricted_child_still_cannot_spawn_or_reach_the_network() {
     );
 
     let result = spawner.spawn_one(sub_config("surveyor", "survey")).await;
-    assert!(!result.is_error, "child failed: {}", result.text);
+    assert!(!result.status.is_error(), "child failed: {}", result.text);
 
     let advertised = provider.advertised_tools.lock().unwrap().clone();
     for forbidden in ["Spawn", "Skill", "WebFetch", "WebSearch"] {
@@ -233,6 +238,7 @@ async fn an_unrestricted_child_still_cannot_spawn_or_reach_the_network() {
         );
     }
     assert!(advertised.contains(&"Read".to_string()), "got {advertised:?}");
+    assert!(advertised.contains(&"ToolSearch".to_string()), "got {advertised:?}");
 }
 
 /// One failing child must not take the batch down: the parent still receives
@@ -269,11 +275,15 @@ async fn a_failing_sibling_does_not_discard_the_other_results() {
     );
     assert!(output.content.contains("alpha result"), "{}", output.content);
     assert!(output.content.contains("gamma result"), "{}", output.content);
-    assert!(output.content.contains("## beta [ERROR]"), "{}", output.content);
+    assert!(
+        output.content.contains("name=\"beta\" status=\"error\""),
+        "{}",
+        output.content
+    );
 
-    let alpha = output.content.find("## alpha").expect("alpha section");
-    let beta = output.content.find("## beta").expect("beta section");
-    let gamma = output.content.find("## gamma").expect("gamma section");
+    let alpha = output.content.find("name=\"alpha\"").expect("alpha section");
+    let beta = output.content.find("name=\"beta\"").expect("beta section");
+    let gamma = output.content.find("name=\"gamma\"").expect("gamma section");
     assert!(
         alpha < beta && beta < gamma,
         "results must keep the requested order despite concurrent completion"

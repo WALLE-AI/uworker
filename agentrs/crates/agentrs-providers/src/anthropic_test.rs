@@ -20,6 +20,7 @@ mod tests {
             messages,
             tools,
             max_tokens: Some(8192),
+            temperature: None,
             thinking,
             reasoning_effort: None,
         }

@@ -18,6 +18,7 @@ pub mod skill_tool;
 pub mod spawn_tool;
 pub mod spawner;
 mod stream;
+mod subagent;
 pub mod summarizer;
 mod task_tools;
 mod todo_reminder;

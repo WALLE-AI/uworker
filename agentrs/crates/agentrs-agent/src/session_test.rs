@@ -38,6 +38,52 @@ mod tests {
     }
 
     #[test]
+    fn child_sessions_are_empty_linked_and_hidden_from_root_listing() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let parent = manager
+            .create("openai", "parent-model", "/repo", Some("parent"))
+            .unwrap();
+        let child = manager
+            .create_child(&parent.id, "openai", "child-model", "/repo", Some("child"))
+            .unwrap();
+
+        assert_eq!(child.forked_from.as_deref(), Some("parent"));
+        assert_eq!(child.root_id.as_deref(), Some("parent"));
+        assert!(child.messages.is_empty());
+        assert_eq!(
+            manager
+                .list()
+                .unwrap()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["parent"]
+        );
+        assert_eq!(manager.children("parent").unwrap()[0].id, "child");
+        assert_eq!(manager.list_all().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_root_cascades_through_all_descendants() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        manager.create("openai", "model", "/repo", Some("root")).unwrap();
+        manager
+            .create_child("root", "openai", "model", "/repo", Some("child"))
+            .unwrap();
+        manager
+            .create_child("child", "openai", "model", "/repo", Some("grandchild"))
+            .unwrap();
+
+        manager.delete("root").unwrap();
+        assert!(manager.list_all().unwrap().is_empty());
+        for id in ["root", "child", "grandchild"] {
+            assert!(!manager.state_path(id).exists());
+        }
+    }
+
+    #[test]
     fn test_save_and_load_session() {
         let dir = tempdir().unwrap();
         let manager = SessionManager::new(dir.path().to_path_buf(), 10);

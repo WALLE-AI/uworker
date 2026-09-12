@@ -260,4 +260,49 @@ mod tests {
         assert_eq!(json["capabilities"]["effort"], true);
         assert_eq!(json["capabilities"]["image_input"], "unsupported");
     }
+
+    #[test]
+    fn subagent_lifecycle_events_have_a_stable_non_sensitive_shape() {
+        let started = serde_json::to_value(ProtocolEvent::SubAgentStarted {
+            id: "child-1".into(),
+            name: "research".into(),
+            parent_msg_id: "msg-1".into(),
+            depth: 2,
+        })
+        .unwrap();
+        assert_eq!(started["type"], "sub_agent_started");
+        assert_eq!(started["depth"], 2);
+
+        let progress = serde_json::to_value(ProtocolEvent::SubAgentProgress {
+            id: "child-1".into(),
+            status: SubAgentEventStatus::Running,
+            turns: 3,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(progress["status"], "running");
+
+        let finished = serde_json::to_value(ProtocolEvent::SubAgentFinished {
+            id: "child-1".into(),
+            status: SubAgentEventStatus::Finished,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_read_tokens: Some(2),
+                cache_write_tokens: None,
+            },
+            turns: 3,
+        })
+        .unwrap();
+        assert_eq!(finished["type"], "sub_agent_finished");
+        for event in [&started, &progress, &finished] {
+            assert!(event.get("prompt").is_none());
+            assert!(event.get("result").is_none());
+        }
+    }
 }

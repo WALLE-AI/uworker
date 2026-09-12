@@ -326,7 +326,8 @@ mod phase7_tests {
     use super::execute_fork;
     use crate::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
     use agentrs_types::message::TokenUsage;
-    use agentrs_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+    use agentrs_types::spawner::{ForkOverrides, Spawner, SubAgentResult, SubAgentSpec, SubAgentStatus};
+    use tokio_util::sync::CancellationToken;
 
     // ---------------------------------------------------------------------------
     // MockSpawner — captures args passed to spawn_fork, returns preset result
@@ -338,7 +339,7 @@ mod phase7_tests {
         /// Preset text value for the returned SubAgentResult.
         text: String,
         /// Captures the SubAgentConfig passed to spawn_fork.
-        captured_config: Mutex<Option<SubAgentConfig>>,
+        captured_config: Mutex<Option<SubAgentSpec>>,
         /// Captures the ForkOverrides passed to spawn_fork.
         captured_overrides: Mutex<Option<ForkOverrides>>,
     }
@@ -362,7 +363,7 @@ mod phase7_tests {
             }
         }
 
-        fn take_config(&self) -> SubAgentConfig {
+        fn take_config(&self) -> SubAgentSpec {
             self.captured_config
                 .lock()
                 .unwrap()
@@ -381,15 +382,25 @@ mod phase7_tests {
 
     #[async_trait]
     impl Spawner for MockSpawner {
-        async fn spawn_fork(&self, config: SubAgentConfig, overrides: ForkOverrides) -> SubAgentResult {
+        async fn spawn(
+            &self,
+            config: SubAgentSpec,
+            overrides: ForkOverrides,
+            _cancel: CancellationToken,
+        ) -> SubAgentResult {
             *self.captured_config.lock().unwrap() = Some(config.clone());
             *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
             SubAgentResult {
+                id: agentrs_types::spawner::SubAgentId::new("test-child"),
                 name: config.name.clone(),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
-                is_error: self.is_error,
+                status: if self.is_error {
+                    SubAgentStatus::Failed
+                } else {
+                    SubAgentStatus::Finished
+                },
             }
         }
     }
@@ -433,7 +444,15 @@ mod phase7_tests {
     async fn tc_7_10_fork_success_returns_ok() {
         let skill = make_fork_skill("my-fork", "Do the task.");
         let spawner = MockSpawner::success("agent completed task");
-        let result = execute_fork(&skill, None, None, Path::new("/tmp"), &spawner).await;
+        let result = execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), "agent completed task");
     }
@@ -443,7 +462,15 @@ mod phase7_tests {
     async fn tc_7_11_fork_sub_agent_error_returns_err() {
         let skill = make_fork_skill("failing-fork", "Do something.");
         let spawner = MockSpawner::error("sub-agent crashed");
-        let result = execute_fork(&skill, None, None, Path::new("/tmp"), &spawner).await;
+        let result = execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(result.is_err(), "expected Err, got: {result:?}");
         assert_eq!(result.unwrap_err(), "sub-agent crashed");
     }
@@ -454,9 +481,16 @@ mod phase7_tests {
         let mut skill = make_fork_skill("model-fork", "content");
         skill.model = Some("claude-sonnet-4-6".to_string());
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let overrides = spawner.take_overrides();
         assert_eq!(overrides.model.as_deref(), Some("claude-sonnet-4-6"));
     }
@@ -467,9 +501,16 @@ mod phase7_tests {
         let mut skill = make_fork_skill("effort-fork", "content");
         skill.effort = Some(EffortLevel::High);
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let overrides = spawner.take_overrides();
         assert_eq!(overrides.effort.as_deref(), Some("high"));
     }
@@ -480,9 +521,16 @@ mod phase7_tests {
         let mut skill = make_fork_skill("tools-fork", "content");
         skill.allowed_tools = vec!["ExecCommand".to_string(), "Read".to_string()];
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let overrides = spawner.take_overrides();
         assert_eq!(overrides.allowed_tools, vec!["ExecCommand", "Read"]);
     }
@@ -493,9 +541,16 @@ mod phase7_tests {
         let mut skill = make_fork_skill("prompt-fork", "Search $ARGUMENTS");
         skill.argument_names = vec![]; // use $ARGUMENTS placeholder
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, Some("rust"), None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            Some("rust"),
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let config = spawner.take_config();
         // Variable substitution should have replaced $ARGUMENTS with "rust"
         assert_eq!(
@@ -509,9 +564,16 @@ mod phase7_tests {
     async fn tc_7_17_sub_agent_config_name_equals_skill_name() {
         let skill = make_fork_skill("my-skill-name", "content");
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let config = spawner.take_config();
         assert_eq!(config.name, "my-skill-name");
     }
@@ -521,7 +583,15 @@ mod phase7_tests {
     async fn tc_7_40_empty_content_no_error() {
         let skill = make_fork_skill("empty-fork", "");
         let spawner = MockSpawner::success("ok");
-        let result = execute_fork(&skill, None, None, Path::new("/tmp"), &spawner).await;
+        let result = execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(result.is_ok(), "empty content should not cause error: {result:?}");
         let config = spawner.take_config();
         assert_eq!(config.prompt, "");
@@ -534,7 +604,15 @@ mod phase7_tests {
         skill.source = SkillSource::Mcp;
         skill.loaded_from = LoadedFrom::Mcp;
         let spawner = MockSpawner::success("mcp result");
-        let result = execute_fork(&skill, None, None, Path::new("/tmp"), &spawner).await;
+        let result = execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(result.is_ok(), "MCP fork skill should be allowed: {result:?}");
     }
 
@@ -543,9 +621,16 @@ mod phase7_tests {
     async fn tc_7_42_no_model_no_effort_fork_overrides_empty() {
         let skill = make_fork_skill("plain-fork", "content");
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let overrides = spawner.take_overrides();
         assert!(overrides.model.is_none(), "model should be None");
         assert!(overrides.effort.is_none(), "effort should be None");
@@ -557,9 +642,16 @@ mod phase7_tests {
     async fn tc_7_43_empty_allowed_tools_passthrough() {
         let skill = make_fork_skill("no-tools-fork", "content");
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let overrides = spawner.take_overrides();
         assert!(overrides.allowed_tools.is_empty());
     }
@@ -569,7 +661,15 @@ mod phase7_tests {
     async fn tc_7_44_result_text_propagated() {
         let skill = make_fork_skill("text-fork", "content");
         let spawner = MockSpawner::success("the final answer");
-        let result = execute_fork(&skill, None, None, Path::new("/tmp"), &spawner).await;
+        let result = execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await;
         assert_eq!(result.unwrap(), "the final answer");
     }
 
@@ -578,11 +678,18 @@ mod phase7_tests {
     async fn tc_7_45_max_turns_default_is_10() {
         let skill = make_fork_skill("turns-fork", "content");
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let config = spawner.take_config();
-        assert_eq!(config.max_turns, 10);
+        assert_eq!(config.max_turns, Some(10));
     }
 
     // TC-7.46: SubAgentConfig.max_tokens defaults to 16384
@@ -590,11 +697,18 @@ mod phase7_tests {
     async fn tc_7_46_max_tokens_default_is_16384() {
         let skill = make_fork_skill("tokens-fork", "content");
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let config = spawner.take_config();
-        assert_eq!(config.max_tokens, 16384);
+        assert_eq!(config.max_tokens, Some(16384));
     }
 
     // TC-7.47: SubAgentConfig.system_prompt defaults to None
@@ -602,9 +716,16 @@ mod phase7_tests {
     async fn tc_7_47_system_prompt_default_is_none() {
         let skill = make_fork_skill("sysprompt-fork", "content");
         let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, Path::new("/tmp"), &spawner)
-            .await
-            .unwrap();
+        execute_fork(
+            &skill,
+            None,
+            None,
+            Path::new("/tmp"),
+            &spawner,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let config = spawner.take_config();
         assert!(config.system_prompt.is_none(), "system_prompt should default to None");
     }

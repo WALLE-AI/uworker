@@ -31,6 +31,7 @@ mod tests {
             )],
             tools,
             max_tokens: Some(8192),
+            temperature: None,
             thinking: None,
             reasoning_effort: None,
         }

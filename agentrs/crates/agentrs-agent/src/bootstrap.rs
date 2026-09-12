@@ -13,6 +13,7 @@ use agentrs_providers::{LlmProvider, create_provider};
 use agentrs_skills::loader::load_all_skills;
 use agentrs_skills::permissions::SkillPermissionChecker;
 use agentrs_skills::types::SkillMetadata;
+use agentrs_tools::context::ToolContext;
 use agentrs_tools::edit::EditTool;
 use agentrs_tools::exec_command::ExecCommandTool;
 use agentrs_tools::file_cache::FileStateCache;
@@ -40,6 +41,7 @@ use crate::session::Session;
 use crate::skill_tool::SkillTool;
 use crate::spawn_tool::SpawnTool;
 use crate::spawner::AgentSpawner;
+use crate::subagent::definitions::AgentDefinitions;
 use crate::summarizer::ProviderSummarizer;
 use crate::todo_reminder::{PlanSource, TodoRuntime};
 use crate::tool_policy::ToolPolicy;
@@ -180,14 +182,14 @@ impl AgentBootstrap {
         let skills = self.load_skills(&environment.workspace, mcp.manager.as_deref()).await;
         let prompt_usage = self.configure_system_prompt(&environment, &skills);
 
-        self.register_agent_tools(&mut registry, &provider, &environment.workspace, skills);
+        let subagent_registry = self.register_agent_tools(&mut registry, &provider, &environment.workspace, skills);
         let plan_active_flag = self.register_plan_tools(&mut registry);
         let plan_source = self.register_task_tracking(&mut registry, &environment.workspace);
         self.register_tool_search(&mut registry);
 
         let has_mcp = mcp.has_mcp();
         let mcp_managers = mcp.managers;
-        let engine = self.into_engine(
+        let mut engine = self.into_engine(
             provider.clone(),
             registry,
             plan_active_flag,
@@ -195,6 +197,7 @@ impl AgentBootstrap {
             environment.workspace,
             prompt_usage,
         );
+        engine.set_subagent_runtime(subagent_registry.0, subagent_registry.1);
 
         Ok(BootstrapResult {
             engine,
@@ -228,11 +231,12 @@ impl AgentBootstrap {
 
     fn build_builtin_registry(&self, workspace_path: &Path) -> ToolRegistry {
         let file_cache = self.build_file_cache();
+        let tool_context = ToolContext::new(file_cache);
         let mut registry = ToolRegistry::new();
 
-        registry.register(Box::new(ReadTool::new(file_cache.clone())));
-        registry.register(Box::new(WriteTool::new(file_cache.clone())));
-        registry.register(Box::new(EditTool::new(file_cache)));
+        registry.register(Box::new(ReadTool::with_context(tool_context.clone())));
+        registry.register(Box::new(WriteTool::with_context(tool_context.clone())));
+        registry.register(Box::new(EditTool::with_context(tool_context)));
         registry.register(Box::new(ExecCommandTool::new_with_env(
             workspace_path.to_path_buf(),
             self.runtime_env.clone(),
@@ -297,7 +301,7 @@ impl AgentBootstrap {
     fn configure_system_prompt(&mut self, environment: &BootstrapEnvironment, skills: &[SkillMetadata]) -> PromptUsage {
         let mut prompt_cache = SystemPromptCache::new();
         let workspace = self.workspace.to_string_lossy();
-        let system_prompt = build_system_prompt_with_shell_and_tool_policy(
+        let mut system_prompt = build_system_prompt_with_shell_and_tool_policy(
             &mut prompt_cache,
             self.config.system_prompt.as_deref(),
             &workspace,
@@ -310,6 +314,15 @@ impl AgentBootstrap {
             self.config.compact.toon,
             &self.tool_policy,
         );
+        if self.config.subagent.enabled && self.tool_policy.allows("Spawn") {
+            let subagents =
+                AgentDefinitions::load(&environment.workspace, self.config.subagent.builtin_agents).prompt_section();
+            if !subagents.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&subagents);
+                prompt_cache.sections.insert("subagents", subagents);
+            }
+        }
         let memory_prompt = prompt_cache.sections.get("memory").map(String::as_str);
         let skills_prompt = prompt_cache.sections.get("skills").map(String::as_str);
         let memory_files = if memory_prompt.is_some() {
@@ -346,28 +359,43 @@ impl AgentBootstrap {
         provider: &Arc<dyn LlmProvider>,
         workspace: &Path,
         skills: Vec<SkillMetadata>,
+    ) -> (
+        Arc<crate::subagent::registry::SubAgentRegistry>,
+        Arc<RwLock<Option<String>>>,
     ) {
+        self.register_web_tools(registry, provider, workspace);
+        let parent_tools = registry.shared_tools();
+        let spawner = Arc::new(
+            AgentSpawner::new_with_env(
+                Arc::clone(provider),
+                self.config.clone(),
+                workspace.to_path_buf(),
+                self.runtime_env.clone(),
+                self.tool_policy.clone(),
+            )
+            .with_progress_output(Arc::clone(&self.output))
+            .with_parent_tools(parent_tools),
+        );
         let skill_checker = SkillPermissionChecker::new(
             self.config.tools.skills.deny.clone(),
             self.config.tools.skills.allow.clone(),
             self.config.tools.auto_approve,
         );
-        registry.register(Box::new(SkillTool::new(
+        registry.register(Box::new(SkillTool::with_spawner(
             Arc::new(skills),
             self.workspace.to_path_buf(),
             skill_checker,
+            self.resume_session.as_ref().map(|session| session.id.clone()),
+            self.config
+                .subagent
+                .enabled
+                .then(|| spawner.clone() as Arc<dyn agentrs_types::subagent::Spawner>),
         )));
 
-        let spawner = AgentSpawner::new_with_env(
-            Arc::clone(provider),
-            self.config.clone(),
-            workspace.to_path_buf(),
-            self.runtime_env.clone(),
-            self.tool_policy.clone(),
-        );
-        registry.register(Box::new(SpawnTool::new(Arc::new(spawner))));
-
-        self.register_web_tools(registry, provider, workspace);
+        if self.config.subagent.enabled && self.tool_policy.allows("Spawn") {
+            registry.register(Box::new(SpawnTool::new(Arc::clone(&spawner))));
+        }
+        (spawner.registry(), spawner.parent_session_slot())
     }
 
     /// Register the network tools, when configured.
@@ -381,7 +409,11 @@ impl AgentBootstrap {
             return;
         }
 
-        let summarizer = Arc::new(ProviderSummarizer::new(Arc::clone(provider), self.config.model.clone()));
+        let definitions = AgentDefinitions::load(workspace, self.config.subagent.builtin_agents);
+        let summarizer = Arc::new(
+            ProviderSummarizer::new(Arc::clone(provider), self.config.model.clone())
+                .with_definition(definitions.resolve(Some("summarize"))),
+        );
         match WebFetchTool::new(web, web_download_dir(workspace), Some(summarizer)) {
             Ok(tool) => registry.register(Box::new(tool)),
             Err(error) => tracing::warn!(

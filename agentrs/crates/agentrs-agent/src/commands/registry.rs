@@ -9,6 +9,7 @@ use crate::output::OutputSink;
 use agentrs_config::compact::CompactConfig;
 use agentrs_providers::LlmProvider;
 use agentrs_types::message::Message;
+use agentrs_types::subagent::AgentDefinition;
 use agentrs_types::tool::ToolDef;
 
 /// User-facing metadata for a registered slash command.
@@ -37,6 +38,7 @@ pub struct CommandContext<'a> {
     pub compact_config: &'a CompactConfig,
     pub provider: Arc<dyn LlmProvider>,
     pub model: &'a str,
+    pub(crate) internal_summarizer: Option<&'a AgentDefinition>,
     pub output: &'a dyn OutputSink,
     pub registry: &'a CommandRegistry,
     pub(crate) context_state: &'a mut ContextState,

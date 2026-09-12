@@ -10,6 +10,7 @@ pub mod logging;
 pub mod plan;
 pub mod schema;
 pub mod shell;
+pub mod subagent;
 pub mod todo;
 pub mod tui;
 pub mod web;

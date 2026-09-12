@@ -1,33 +1,5 @@
 # Advanced Features
 
-## Sub-Agent Spawning
-
-The LLM can use the Spawn tool to create independent sub-agents that run tasks in parallel. Each sub-agent has its own conversation context, inherits the parent agent's runtime tool policy, and shares the parent agent's LLM provider (connection pool reuse). Fork-mode overrides can further restrict inherited tools but cannot restore tools denied to the parent.
-
-### Use Cases
-
-- "Search these 3 files simultaneously and summarize each"
-- "Run tests and lint in parallel"
-- "Search for X in the codebase while reading Y"
-
-### Limits
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Max parallel sub-agents | 5 | Prevents resource exhaustion |
-| Sub-agent max turns | 10 | Per sub-agent run turn limit |
-| Sub-agent max tokens | 4096 | Per sub-agent response token limit |
-
-### Behavior
-
-- Sub-agents auto-approve all tool calls (no confirmation prompts)
-- Sub-agents cannot exceed the parent agent's runtime tool policy
-- Sub-agents do not save sessions
-- Sub-agents run silently (no stdout output)
-- All results are merged and returned to the parent agent
-
----
-
 ## Hook System
 
 Event-driven hooks execute shell commands at specific points in the tool lifecycle, enabling auto-formatting, linting, auditing, and more.
@@ -352,6 +324,59 @@ When in plan mode, the agent follows a structured 4-phase process:
 2. **Design** — Identify files to modify, code to reuse
 3. **Write the plan** — Compose a clear, actionable implementation plan
 4. **Submit** — Call `ExitPlanMode` to restore full tool access
+
+---
+
+## Sub-agents
+
+The `Spawn` tool runs independent child agents in parallel. Each child starts with clean conversation history, an independent file/tool context, a capability-derived system prompt, and a tool set that can only be narrower than the parent's policy. Child usage is included in the parent run's total usage without inflating the parent's context-window estimate.
+
+### Configuration
+
+```toml
+[subagent]
+enabled = true
+max_per_call = 5
+max_concurrent = 5
+max_turns = 200
+max_tokens = 4096
+depth = 1
+# turn_output_budget = 50000
+cancel_grace = 5000
+persist_sessions = true
+builtin_agents = true
+```
+
+`depth = 1` allows only direct children. Increase it to expose `Spawn` to children until the configured depth is reached. `turn_output_budget` rejects later spawns after child output consumes the per-parent-turn budget. Cancelling the parent propagates to every active child.
+
+### Agent Definitions
+
+Reusable definitions are Markdown files loaded in this priority order: built-ins, `~/.agentrs/agents/*.md`, then `<workspace>/.agentrs/agents/*.md`. A later definition with the same name replaces the earlier one.
+
+```markdown
+---
+name: reviewer
+when-to-use: Review a change for correctness and missing tests.
+allowed-tools: [Read, Grep, Glob, ExecCommand]
+denied-tools: [Write, Edit]
+model: inherit
+effort: high
+temperature: 0.1
+max-turns: 40
+max-tokens: 4096
+omit-project-rules: false
+hidden: false
+---
+Review the requested change. Return findings first with exact file references.
+```
+
+The built-in visible definitions are `general-purpose`, `explore`, and `plan`. `explore` receives a read-only command policy. Hidden definitions are omitted from the parent prompt and are used for internal operations such as summarization.
+
+### Resume And Isolation
+
+Pass a previous child ID as `task_id` to continue its persisted conversation. Child sessions are stored with parent lineage, omitted from normal root session listings, and deleted recursively with their parent.
+
+Set `isolation` to `worktree` for a detached Git worktree. A clean worktree is removed automatically. A worktree containing changes is preserved and its path is appended to the child result. Resuming an existing child while requesting a new worktree is rejected.
 
 ---
 

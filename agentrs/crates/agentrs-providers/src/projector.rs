@@ -102,6 +102,9 @@ impl AnthropicWireProjector {
         if let Some(max_tokens) = max_tokens {
             body["max_tokens"] = json!(max_tokens);
         }
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = json!(temperature);
+        }
 
         if params.include_model_in_body {
             body["model"] = json!(request.model);
@@ -175,6 +178,9 @@ impl OpenAiProjector {
         });
         if let Some(max_tokens) = max_tokens {
             body[max_tokens_field] = json!(max_tokens);
+        }
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = json!(temperature);
         }
 
         if compat.include_stream_options() {

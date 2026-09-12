@@ -28,6 +28,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "serial_test",
  "tempfile",
  "thiserror 2.0.18",
@@ -218,6 +219,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "unicode-width",
  "workspace-hack",
@@ -282,6 +284,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tokio-util",
  "workspace-hack",
 ]
 

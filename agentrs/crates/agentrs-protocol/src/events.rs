@@ -76,14 +76,43 @@ pub enum ProtocolEvent {
     TodoUpdated {
         todos: Vec<TodoSnapshot>,
     },
+    SubAgentStarted {
+        id: String,
+        name: String,
+        parent_msg_id: String,
+        depth: usize,
+    },
+    SubAgentProgress {
+        id: String,
+        status: SubAgentEventStatus,
+        turns: usize,
+        usage: Usage,
+    },
+    SubAgentFinished {
+        id: String,
+        status: SubAgentEventStatus,
+        usage: Usage,
+        turns: usize,
+    },
     Pong,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentEventStatus {
+    Pending,
+    Running,
+    Idle,
+    Finished,
+    Failed,
+    Cancelled,
 }
 
 /// One checklist entry as it crosses the protocol boundary.
 ///
 /// Deliberately a separate type from the tool's own item: this is the host
 /// contract, and it must not move whenever the tool's internals do. `status` is
-/// a plain string for the same reason — a host that meets an unfamiliar value
+/// a plain string for the same reason: a host that meets an unfamiliar value
 /// should be able to display it rather than fail to parse the frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TodoSnapshot {
@@ -151,7 +180,7 @@ pub enum OutputType {
     Image,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,

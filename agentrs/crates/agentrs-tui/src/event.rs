@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use agentrs_agent::output::OutputSink;
-use agentrs_protocol::events::{ProtocolEvent, TodoSnapshot, ToolStatus};
+use agentrs_protocol::events::{ProtocolEvent, SubAgentEventStatus, TodoSnapshot, ToolStatus, Usage};
 use agentrs_protocol::writer::ProtocolEmitter;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -46,6 +46,23 @@ pub(super) enum AgentEvent {
         reason: String,
     },
     TodoUpdated(Vec<TodoSnapshot>),
+    SubAgentStarted {
+        id: String,
+        name: String,
+        depth: usize,
+    },
+    SubAgentProgress {
+        id: String,
+        status: SubAgentEventStatus,
+        turns: usize,
+        output_tokens: u64,
+    },
+    SubAgentFinished {
+        id: String,
+        status: SubAgentEventStatus,
+        turns: usize,
+        output_tokens: u64,
+    },
 }
 
 pub(super) struct TuiSink {
@@ -114,6 +131,32 @@ impl OutputSink for TuiSink {
     fn emit_todo_update(&self, todos: &[TodoSnapshot]) {
         self.send(AgentEvent::TodoUpdated(todos.to_vec()));
     }
+
+    fn emit_subagent_started(&self, id: &str, name: &str, _parent_msg_id: &str, depth: usize) {
+        self.send(AgentEvent::SubAgentStarted {
+            id: id.to_string(),
+            name: name.to_string(),
+            depth,
+        });
+    }
+
+    fn emit_subagent_progress(&self, id: &str, status: SubAgentEventStatus, turns: usize, usage: Usage) {
+        self.send(AgentEvent::SubAgentProgress {
+            id: id.to_string(),
+            status,
+            turns,
+            output_tokens: usage.output_tokens,
+        });
+    }
+
+    fn emit_subagent_finished(&self, id: &str, status: SubAgentEventStatus, turns: usize, usage: Usage) {
+        self.send(AgentEvent::SubAgentFinished {
+            id: id.to_string(),
+            status,
+            turns,
+            output_tokens: usage.output_tokens,
+        });
+    }
 }
 
 pub(super) struct TuiProtocolEmitter {
@@ -163,6 +206,37 @@ impl ProtocolEmitter for TuiProtocolEmitter {
                 name: "tool".to_string(),
                 reason: reason.clone(),
             }),
+            ProtocolEvent::SubAgentStarted { id, name, depth, .. } => self.send(AgentEvent::SubAgentStarted {
+                id: id.clone(),
+                name: name.clone(),
+                depth: *depth,
+            }),
+            ProtocolEvent::SubAgentProgress {
+                id,
+                status,
+                turns,
+                usage,
+            } => {
+                self.send(AgentEvent::SubAgentProgress {
+                    id: id.clone(),
+                    status: *status,
+                    turns: *turns,
+                    output_tokens: usage.output_tokens,
+                });
+            }
+            ProtocolEvent::SubAgentFinished {
+                id,
+                status,
+                turns,
+                usage,
+            } => {
+                self.send(AgentEvent::SubAgentFinished {
+                    id: id.clone(),
+                    status: *status,
+                    turns: *turns,
+                    output_tokens: usage.output_tokens,
+                });
+            }
             _ => {}
         }
         Ok(())

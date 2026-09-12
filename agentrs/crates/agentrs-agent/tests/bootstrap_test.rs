@@ -35,6 +35,7 @@ fn minimal_config() -> Config {
         logging: Default::default(),
         tui: agentrs_config::tui::TuiConfig::default(),
         web: agentrs_config::web::WebConfig::default(),
+        subagent: Default::default(),
     }
 }
 

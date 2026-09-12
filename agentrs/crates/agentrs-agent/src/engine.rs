@@ -1,11 +1,11 @@
 use std::mem::replace;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::commands::{CommandContext, CommandRegistry, CommandResult, CommandSpec, SlashCommand, default_registry};
-use crate::compact::auto::{CompactError, autocompact, should_autocompact};
+use crate::compact::auto::{CompactError, should_autocompact};
 use crate::compact::emergency::is_at_emergency_limit;
 use crate::compact::estimate::{estimate_tokens_from_tool_image, estimate_tokens_from_tool_result};
 use crate::compact::micro::{microcompact, should_microcompact};
@@ -24,6 +24,7 @@ use crate::plan::prompt::plan_mode_instructions;
 use crate::plan::state::PlanState;
 use crate::session::{Session, SessionManager};
 use crate::stream::StreamOutcome;
+use crate::subagent::registry::SubAgentRegistry;
 use crate::todo_reminder::TodoRuntime;
 use crate::tool_call::{
     DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, ToolCallFailureFingerprint,
@@ -45,6 +46,7 @@ use agentrs_tools::registry::ToolRegistry;
 use agentrs_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
 use agentrs_types::message::{ContentBlock, ImageInputCapability, Message, Role, StopReason, TokenUsage};
 use agentrs_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
+use agentrs_types::subagent::AgentDefinition;
 use agentrs_types::tool::ToolDef;
 use anyhow::{Error as AnyhowError, Result as AnyhowResult};
 use chrono::Utc;
@@ -101,6 +103,8 @@ pub struct AgentEngine {
     current_turn_id: Option<String>,
     /// Maximum output tokens requested from the provider per turn.
     max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    internal_summarizer: Option<AgentDefinition>,
     /// Optional cap on counted model turns within a single run.
     max_turns_per_run: Option<usize>,
     /// Consecutive malformed tool-call round limit before aborting.
@@ -124,6 +128,9 @@ pub struct AgentEngine {
     /// Long-running tools (network fetches) observe this so an interrupted turn
     /// does not have to wait out their request timeout.
     turn_cancel: CancellationToken,
+    /// Process-wide lifecycle registry shared with Spawn tools and descendants.
+    subagent_registry: Option<Arc<SubAgentRegistry>>,
+    subagent_parent_id: Option<Arc<RwLock<Option<String>>>>,
 
     // Session persistence.
     /// Optional session manager used when persistence is enabled.
@@ -211,12 +218,18 @@ impl AgentEngine {
         let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
         let compact_context_window_source = config.compact_context_window_source;
+        let internal_summarizer =
+            crate::subagent::definitions::AgentDefinitions::load(&cwd, config.subagent.builtin_agents)
+                .resolve(Some("summarize"))
+                .cloned();
 
         let prompt_usage = PromptUsage::from_system_prompt(&system_prompt);
         let mut engine = Self {
             provider,
             model: config.model,
             max_tokens: config.max_tokens,
+            temperature: None,
+            internal_summarizer,
             thinking: config.thinking,
             compat: config.compat.clone(),
             system_prompt,
@@ -239,6 +252,8 @@ impl AgentEngine {
             allow_list,
             hooks: Some(HookEngine::new_with_env(config.hooks.clone(), cwd.clone(), runtime_env)),
             turn_cancel: CancellationToken::new(),
+            subagent_registry: None,
+            subagent_parent_id: None,
             session_manager,
             current_session: None,
             output,
@@ -309,6 +324,10 @@ impl AgentEngine {
         let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
         let compact_context_window_source = config.compact_context_window_source;
+        let internal_summarizer =
+            crate::subagent::definitions::AgentDefinitions::load(&cwd, config.subagent.builtin_agents)
+                .resolve(Some("summarize"))
+                .cloned();
 
         let prompt_usage = PromptUsage::from_system_prompt(&system_prompt);
         let context_state = session.context_state.clone();
@@ -318,6 +337,8 @@ impl AgentEngine {
             provider,
             model: config.model.clone(),
             max_tokens: config.max_tokens,
+            temperature: None,
+            internal_summarizer,
             thinking: config.thinking,
             compat: config.compat.clone(),
             system_prompt,
@@ -340,6 +361,8 @@ impl AgentEngine {
             allow_list,
             hooks: Some(HookEngine::new_with_env(config.hooks.clone(), cwd, runtime_env)),
             turn_cancel: CancellationToken::new(),
+            subagent_registry: None,
+            subagent_parent_id: None,
             session_manager,
             current_session: Some(session),
             output,
@@ -440,6 +463,10 @@ impl AgentEngine {
     /// Set the initial reasoning effort override (used by sub-agents spawned with an effort override).
     pub fn set_initial_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+    }
+
+    pub(crate) fn set_temperature(&mut self, temperature: Option<f32>) {
+        self.temperature = temperature;
     }
 
     /// Set the shared plan-mode active flag.
@@ -561,6 +588,7 @@ impl AgentEngine {
             self.max_tool_call_failure_turns,
         );
         loop {
+            self.drain_subagent_usage();
             if let Some(limit) = guards.turn_budget_reached() {
                 self.save_session();
                 let message = format!(
@@ -734,6 +762,7 @@ impl AgentEngine {
             messages,
             tools,
             max_tokens: self.max_tokens,
+            temperature: self.temperature,
             thinking: self.thinking.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
         }
@@ -1240,12 +1269,13 @@ impl AgentEngine {
             let provider = Arc::clone(&self.provider);
             let mut compact_messages = self.messages.clone();
             project_image_input(&mut compact_messages, self.compat.image_input(), &self.model);
-            match autocompact(
+            match crate::compact::auto::autocompact_with_definition(
                 provider.as_ref(),
                 &compact_messages,
                 &self.model,
                 &self.compact_config,
                 &mut self.compact_state,
+                self.internal_summarizer.as_ref(),
             )
             .await
             {
@@ -1352,6 +1382,26 @@ impl AgentEngine {
             session.context_state = self.context_state.clone();
             mgr.save(&session)?;
             info!(target: "agentrs_agent", session_id = %session.id, provider = %provider_name, model = %self.model, "session started");
+            self.current_session = Some(session);
+            if let Some(parent_id) = &self.subagent_parent_id {
+                *parent_id.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    self.current_session.as_ref().map(|session| session.id.clone());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn init_child_session(
+        &mut self,
+        parent_id: &str,
+        provider_name: &str,
+        cwd: &str,
+        session_id: Option<&str>,
+    ) -> AnyhowResult<()> {
+        if let Some(manager) = &self.session_manager {
+            let mut session = manager.create_child(parent_id, provider_name, &self.model, cwd, session_id)?;
+            session.context_state = self.context_state.clone();
+            manager.save(&session)?;
             self.current_session = Some(session);
         }
         Ok(())
@@ -1561,6 +1611,7 @@ impl AgentEngine {
             compact_config: &self.compact_config,
             provider: Arc::clone(&self.provider),
             model: &self.model,
+            internal_summarizer: self.internal_summarizer.as_ref(),
             output: self.output.as_ref(),
             registry: &self.commands,
             context_state: &mut self.context_state,
@@ -1653,6 +1704,37 @@ impl AgentEngine {
     /// closing the turn can call it directly.
     pub fn cancel_running_tools(&mut self) {
         self.turn_cancel.cancel();
+        if let Some(registry) = &self.subagent_registry {
+            registry.cancel_all_now();
+        }
+    }
+
+    pub(crate) fn set_subagent_runtime(
+        &mut self,
+        registry: Arc<SubAgentRegistry>,
+        parent_id: Arc<RwLock<Option<String>>>,
+    ) {
+        self.subagent_registry = Some(registry);
+        *parent_id.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            self.current_session.as_ref().map(|session| session.id.clone());
+        self.subagent_parent_id = Some(parent_id);
+    }
+
+    fn record_subagent_usage(&mut self, usage: &TokenUsage) {
+        self.total_usage.input_tokens += usage.input_tokens;
+        self.total_usage.output_tokens += usage.output_tokens;
+        self.total_usage.cache_creation_tokens += usage.cache_creation_tokens;
+        self.total_usage.cache_read_tokens += usage.cache_read_tokens;
+    }
+
+    fn drain_subagent_usage(&mut self) {
+        let usage = self
+            .subagent_registry
+            .as_ref()
+            .map(|registry| registry.drain_turn_usage());
+        if let Some(usage) = usage {
+            self.record_subagent_usage(&usage);
+        }
     }
 
     /// Arm a fresh cancellation scope for a new run.

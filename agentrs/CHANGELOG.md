@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **agent:** add cancellable, addressable sub-agents with concurrency, depth, token, and session budgets
+* **agent:** add reusable agent definitions, built-in explore/plan agents, structured progress events, and hidden summarizer configuration
+* **agent:** add optional Git worktree isolation and recursive child-session lifecycle management
+* **tools:** support shared tool instances with per-engine tool contexts and read-only command enforcement
+
+### Documentation
+
+* document sub-agent configuration, definitions, resume behavior, and worktree isolation
+
 ## [0.2.11](https://github.com/iOfficeAI/agentrs/compare/v0.2.10...v0.2.11) (2026-08-13)
 
 

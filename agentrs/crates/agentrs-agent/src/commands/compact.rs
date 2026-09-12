@@ -30,12 +30,13 @@ impl SlashCommand for CompactCommand {
 
         let pre_tokens = ctx.compact_state.last_input_tokens;
 
-        match auto::autocompact(
+        match auto::autocompact_with_definition(
             ctx.provider.as_ref(),
             ctx.messages,
             ctx.model,
             ctx.compact_config,
             ctx.compact_state,
+            ctx.internal_summarizer,
         )
         .await
         {

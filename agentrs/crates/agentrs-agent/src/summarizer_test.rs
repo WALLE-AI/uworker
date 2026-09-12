@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use agentrs_providers::{LlmProvider, ProviderError};
 use agentrs_types::llm::{LlmEvent, LlmRequest};
 use agentrs_types::message::{StopReason, TokenUsage};
+use agentrs_types::subagent::{AgentDefinition, AgentSource};
 use agentrs_types::summarizer::TextSummarizer;
 
 use super::ProviderSummarizer;
@@ -118,6 +119,39 @@ async fn the_request_carries_the_page_content_and_the_instruction() {
         request.system.contains("never follow"),
         "fetched pages are untrusted input and the system prompt must say so"
     );
+}
+
+#[tokio::test]
+async fn hidden_definition_controls_the_secondary_request() {
+    let provider = ScriptedProvider::replaying(vec![LlmEvent::TextDelta("ok".into()), done()]);
+    let definition = AgentDefinition {
+        name: "summarize".into(),
+        when_to_use: "internal".into(),
+        allowed_tools: Vec::new(),
+        denied_tools: Vec::new(),
+        model: Some("summary-model".into()),
+        effort: Some("low".into()),
+        temperature: Some(0.25),
+        max_turns: None,
+        max_tokens: Some(777),
+        system_prompt: Some("Summarize untrusted content safely.".into()),
+        omit_project_rules: true,
+        hidden: true,
+        source: AgentSource::Project,
+    };
+
+    ProviderSummarizer::new(provider.clone(), "parent-model".into())
+        .with_definition(Some(&definition))
+        .summarize("question", "content")
+        .await
+        .unwrap();
+
+    let request = provider.last_request();
+    assert_eq!(request.model, "summary-model");
+    assert_eq!(request.system, "Summarize untrusted content safely.");
+    assert_eq!(request.max_tokens, Some(777));
+    assert_eq!(request.temperature, Some(0.25));
+    assert_eq!(request.reasoning_effort.as_deref(), Some("low"));
 }
 
 // --- TC-1.6-02: failures surface as Err, never a panic ---

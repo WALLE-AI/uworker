@@ -329,6 +329,43 @@ impl AppState {
                 self.update_tool_step(&call_id, &name, ToolStepStatus::Cancelled, Some(reason));
             }
             AgentEvent::TodoUpdated(todos) => self.todos = todos,
+            AgentEvent::SubAgentStarted { id, name, depth } => {
+                self.close_active_blocks();
+                self.transcript.push(TranscriptEntry::new(
+                    EntryKind::Info,
+                    "Sub-agent",
+                    format!(
+                        "{name} started ({}..., depth {depth})",
+                        id.chars().take(8).collect::<String>()
+                    ),
+                ));
+            }
+            AgentEvent::SubAgentProgress {
+                id,
+                status,
+                turns,
+                output_tokens,
+            } => self.transcript.push(TranscriptEntry::new(
+                EntryKind::Info,
+                "Sub-agent",
+                format!(
+                    "{}...: {status:?}, {turns} turns, {output_tokens} output tokens",
+                    id.chars().take(8).collect::<String>()
+                ),
+            )),
+            AgentEvent::SubAgentFinished {
+                id,
+                status,
+                turns,
+                output_tokens,
+            } => self.transcript.push(TranscriptEntry::new(
+                EntryKind::Info,
+                "Sub-agent",
+                format!(
+                    "{}... finished: {status:?}, {turns} turns, {output_tokens} output tokens",
+                    id.chars().take(8).collect::<String>()
+                ),
+            )),
         }
     }
 

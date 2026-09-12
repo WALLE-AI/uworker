@@ -10,6 +10,7 @@ use agentrs_providers::{LlmProvider, ProviderError};
 use agentrs_types::compact::{CompactMetadata, CompactTrigger};
 use agentrs_types::llm::{LlmEvent, LlmRequest};
 use agentrs_types::message::{ContentBlock, Message, Role, TokenUsage};
+use agentrs_types::subagent::AgentDefinition;
 use tokio::sync::mpsc;
 
 use super::prompt::{
@@ -91,6 +92,17 @@ pub async fn autocompact(
     config: &CompactConfig,
     state: &mut CompactState,
 ) -> Result<CompactResult, CompactError> {
+    autocompact_with_definition(provider, messages, model, config, state, None).await
+}
+
+pub(crate) async fn autocompact_with_definition(
+    provider: &dyn LlmProvider,
+    messages: &[Message],
+    model: &str,
+    config: &CompactConfig,
+    state: &mut CompactState,
+    definition: Option<&AgentDefinition>,
+) -> Result<CompactResult, CompactError> {
     // Circuit breaker check
     if state.is_circuit_broken(config) {
         return Err(CompactError::CircuitBroken {
@@ -110,13 +122,22 @@ pub async fn autocompact(
 
     let summary_text = loop {
         let request = LlmRequest {
-            model: model.to_string(),
-            system: COMPACT_SYSTEM_PROMPT.to_string(),
+            model: definition
+                .and_then(|item| item.model.clone())
+                .unwrap_or_else(|| model.to_string()),
+            system: definition
+                .and_then(|item| item.system_prompt.clone())
+                .unwrap_or_else(|| COMPACT_SYSTEM_PROMPT.to_string()),
             messages: conv_messages.clone(),
             tools: vec![],
-            max_tokens: Some(COMPACT_MAX_OUTPUT_TOKENS),
+            max_tokens: Some(
+                definition
+                    .and_then(|item| item.max_tokens)
+                    .unwrap_or(COMPACT_MAX_OUTPUT_TOKENS),
+            ),
+            temperature: definition.and_then(|item| item.temperature),
             thinking: None,
-            reasoning_effort: None,
+            reasoning_effort: definition.and_then(|item| item.effort.clone()),
         };
 
         match provider.stream(&request).await {

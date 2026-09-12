@@ -72,6 +72,7 @@ mod tests {
         };
 
         Config {
+            subagent: Default::default(),
             provider_label: provider_label.to_string(),
             provider,
             api_key: api_key.to_string(),

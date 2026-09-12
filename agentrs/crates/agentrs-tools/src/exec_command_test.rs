@@ -6,6 +6,36 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn read_only_mode_rejects_mutation_and_shell_composition() {
+        let tool = ExecCommandTool::new_read_only_with_env(std::env::temp_dir(), Vec::new());
+        for command in [
+            "rm file",
+            "mkdir out",
+            "git reset --hard",
+            "cat file > copy",
+            "ls | sort",
+            "echo $(whoami)",
+        ] {
+            let result = tool.execute(json!({"cmd": command})).await;
+            assert!(result.is_error, "{command} must be rejected");
+            assert!(result.content.contains("read-only policy"));
+        }
+    }
+
+    #[test]
+    fn read_only_validator_accepts_inspection_commands() {
+        for command in [
+            "ls -la",
+            "cat Cargo.toml",
+            "git status --short",
+            "git log -n 3",
+            "rg Spawn crates",
+        ] {
+            assert!(validate_read_only_command(command).is_ok(), "{command}");
+        }
+    }
+
+    #[tokio::test]
     async fn execute_echo_returns_stdout() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         let input = json!({"cmd": "echo hello_exec_command"});

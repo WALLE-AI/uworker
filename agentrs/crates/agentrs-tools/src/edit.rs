@@ -9,6 +9,7 @@ use agentrs_protocol::events::ToolCategory;
 use agentrs_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
 
 #[derive(Clone, Copy)]
@@ -115,7 +116,7 @@ fn convert_line_endings(text: &str, line_ending: LineEnding) -> Cow<'_, str> {
 }
 
 pub struct EditTool {
-    file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    context: ToolContext,
 }
 
 impl EditTool {
@@ -128,7 +129,11 @@ impl EditTool {
     ///
     /// Pass `None` to disable all cache-related guards (legacy behavior).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self::with_context(ToolContext::new(file_cache))
+    }
+
+    pub fn with_context(context: ToolContext) -> Self {
+        Self { context }
     }
 }
 
@@ -203,7 +208,7 @@ impl Tool for EditTool {
         let path = Path::new(file_path);
 
         // Cache guard: "must Read first" + staleness detection.
-        if let Some(cache_arc) = &self.file_cache
+        if let Some(cache_arc) = self.context.file_cache()
             && let Ok(mut cache) = cache_arc.write()
         {
             let cached = cache.get(path);
@@ -290,7 +295,7 @@ impl Tool for EditTool {
         }
 
         // Post-write cache update: refresh mtime and content.
-        if let Some(cache_arc) = &self.file_cache {
+        if let Some(cache_arc) = self.context.file_cache() {
             update_cache_after_write(cache_arc, path, &new_content);
         }
 

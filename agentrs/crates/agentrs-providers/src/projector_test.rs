@@ -20,6 +20,7 @@ mod tests {
             )],
             tools,
             max_tokens: Some(8192),
+            temperature: None,
             thinking,
             reasoning_effort: None,
         }
@@ -612,6 +613,27 @@ mod tests {
             }
             other => panic!("unexpected projection error: {other}"),
         }
+    }
+
+    #[test]
+    fn temperature_is_projected_for_openai_and_anthropic_wires() {
+        let mut request = test_request(Vec::new(), None);
+        request.temperature = Some(0.35);
+
+        let openai = OpenAiProjector::project(&request, &ProviderCompat::openai_defaults()).unwrap();
+        assert!((openai["temperature"].as_f64().unwrap() - 0.35).abs() < 1e-6);
+
+        let params = WireParams {
+            provider: WireProvider::Anthropic,
+            anthropic_version: None,
+            include_model_in_body: true,
+            include_stream: true,
+            cache_enabled: false,
+            sanitize_schema: false,
+        };
+        let anthropic =
+            AnthropicWireProjector::project(&request, &ProviderCompat::anthropic_defaults(), params).unwrap();
+        assert!((anthropic["temperature"].as_f64().unwrap() - 0.35).abs() < 1e-6);
     }
 
     #[test]

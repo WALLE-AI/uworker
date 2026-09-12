@@ -1,5 +1,17 @@
 # Troubleshooting
 
+## Local Mock Server Tests
+
+Provider and MCP tests use loopback mock servers. If the machine has an HTTP
+proxy configured, exclude loopback traffic before running the suite:
+
+```text
+NO_PROXY=127.0.0.1,localhost
+```
+
+On Windows PowerShell, set `$env:NO_PROXY` to the same value for the current
+terminal. This prevents local requests from being routed through the proxy.
+
 ## API Key Not Configured
 
 ```

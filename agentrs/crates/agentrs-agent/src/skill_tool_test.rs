@@ -609,11 +609,12 @@ mod phase7_tests {
     use async_trait::async_trait;
     use serde_json::json;
 
-    use crate::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+    use crate::spawner::{ForkOverrides, Spawner, SubAgentResult, SubAgentSpec, SubAgentStatus};
     use agentrs_skills::permissions::SkillPermissionChecker;
     use agentrs_skills::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
     use agentrs_tools::Tool;
     use agentrs_types::message::TokenUsage;
+    use tokio_util::sync::CancellationToken;
 
     use super::SkillTool;
 
@@ -624,7 +625,7 @@ mod phase7_tests {
     struct MockSpawner {
         is_error: bool,
         text: String,
-        captured_config: Mutex<Option<SubAgentConfig>>,
+        captured_config: Mutex<Option<SubAgentSpec>>,
         captured_overrides: Mutex<Option<ForkOverrides>>,
     }
 
@@ -649,7 +650,7 @@ mod phase7_tests {
         }
 
         #[allow(dead_code)]
-        fn take_config(&self) -> SubAgentConfig {
+        fn take_config(&self) -> SubAgentSpec {
             self.captured_config
                 .lock()
                 .unwrap()
@@ -669,15 +670,25 @@ mod phase7_tests {
 
     #[async_trait]
     impl Spawner for MockSpawner {
-        async fn spawn_fork(&self, config: SubAgentConfig, overrides: ForkOverrides) -> SubAgentResult {
+        async fn spawn(
+            &self,
+            config: SubAgentSpec,
+            overrides: ForkOverrides,
+            _cancel: CancellationToken,
+        ) -> SubAgentResult {
             *self.captured_config.lock().unwrap() = Some(config.clone());
             *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
             SubAgentResult {
+                id: crate::spawner::SubAgentId::new("test-child"),
                 name: config.name.clone(),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
-                is_error: self.is_error,
+                status: if self.is_error {
+                    SubAgentStatus::Failed
+                } else {
+                    SubAgentStatus::Finished
+                },
             }
         }
     }

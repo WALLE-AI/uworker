@@ -4,7 +4,8 @@ use crate::context_modifier::effort_to_string;
 use crate::shell::{ShellExecutionError, execute_shell_commands};
 use crate::substitution::substitute_arguments;
 use crate::types::{ExecutionContext, SkillMetadata};
-use agentrs_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
+use agentrs_types::subagent::{ForkOverrides, Spawner, SubAgentSpec};
+use tokio_util::sync::CancellationToken;
 
 /// Prepare skill content for inline execution.
 ///
@@ -80,18 +81,24 @@ pub async fn execute_fork(
     session_id: Option<&str>,
     cwd: &Path,
     spawner: &dyn Spawner,
+    cancel: CancellationToken,
 ) -> Result<String, String> {
     // Prepare content (substitution + shell) — same pipeline as inline mode
     let prompt = prepare_inline_content(skill, args, session_id, cwd)
         .await
         .map_err(|e: ShellExecutionError| e.to_string())?;
 
-    let sub_config = SubAgentConfig {
+    let sub_config = SubAgentSpec {
         name: skill.name.clone(),
+        agent_type: None,
         prompt,
-        max_turns: 10,
-        max_tokens: 16384,
+        max_turns: Some(10),
+        max_tokens: Some(16384),
         system_prompt: None,
+        depth: 0,
+        resume: None,
+        persistent: false,
+        isolation: agentrs_types::subagent::SubAgentIsolation::Shared,
     };
 
     let overrides = ForkOverrides {
@@ -100,8 +107,8 @@ pub async fn execute_fork(
         allowed_tools: skill.allowed_tools.clone(),
     };
 
-    let result = spawner.spawn_fork(sub_config, overrides).await;
-    if result.is_error {
+    let result = spawner.spawn(sub_config, overrides, cancel).await;
+    if result.status.is_error() {
         Err(result.text)
     } else {
         Ok(result.text)

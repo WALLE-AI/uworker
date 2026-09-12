@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::fs;
 use std::io::ErrorKind;
@@ -53,6 +53,8 @@ pub struct SessionIndex {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub model: String,
@@ -112,6 +114,44 @@ impl SessionManager {
         })?;
         self.cleanup_old()?;
         Ok(session)
+    }
+
+    /// Create an empty child session while retaining the parent's lineage.
+    pub fn create_child(
+        &self,
+        parent_id: &str,
+        provider: &str,
+        model: &str,
+        cwd: &str,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        let parent = self.load(parent_id)?;
+        let id = match session_id {
+            Some(custom_id) => custom_id.to_string(),
+            None => self.generate_unique_id()?,
+        };
+        let child = Session {
+            id,
+            forked_from: Some(parent.id.clone()),
+            root_id: Some(parent.root_id.unwrap_or(parent.id)),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            cwd: cwd.to_string(),
+            total_usage: TokenUsage::default(),
+            context_state: ContextState::default(),
+            todos: Vec::new(),
+            messages: Vec::new(),
+        };
+        self.with_session_lock(&child.id, || {
+            if self.session_exists(&child.id)? {
+                anyhow::bail!("Session ID '{}' already exists", child.id);
+            }
+            self.save_unlocked(&child)
+        })?;
+        self.cleanup_old()?;
+        Ok(child)
     }
 
     /// Save current session state (called after each turn)
@@ -213,6 +253,15 @@ impl SessionManager {
 
     /// List all sessions
     pub fn list(&self) -> anyhow::Result<Vec<SessionMeta>> {
+        Ok(self
+            .list_all()?
+            .into_iter()
+            .filter(|session| session.forked_from.is_none())
+            .collect())
+    }
+
+    /// List roots and descendants for protocol and maintenance callers.
+    pub fn list_all(&self) -> anyhow::Result<Vec<SessionMeta>> {
         let mut merged = HashMap::new();
 
         for meta in self.list_legacy()? {
@@ -225,6 +274,28 @@ impl SessionManager {
         let mut sessions: Vec<_> = merged.into_values().collect();
         sessions.sort_by_key(|s| s.created_at);
         Ok(sessions)
+    }
+
+    pub fn children(&self, parent_id: &str) -> anyhow::Result<Vec<SessionMeta>> {
+        Ok(self
+            .list_all()?
+            .into_iter()
+            .filter(|session| session.forked_from.as_deref() == Some(parent_id))
+            .collect())
+    }
+
+    pub fn delete(&self, session_id: &str) -> anyhow::Result<()> {
+        self.delete_recursive(session_id, &mut HashSet::new())
+    }
+
+    fn delete_recursive(&self, session_id: &str, visited: &mut HashSet<String>) -> anyhow::Result<()> {
+        if !visited.insert(session_id.to_string()) {
+            anyhow::bail!("cycle detected while deleting session lineage at '{session_id}'");
+        }
+        for child in self.children(session_id)? {
+            self.delete_recursive(&child.id, visited)?;
+        }
+        self.with_session_lock(session_id, || self.remove_session_layouts(session_id))
     }
 
     /// Update the session index (public, called from engine after save).
@@ -474,6 +545,7 @@ fn meta_from_session(session: &Session) -> SessionMeta {
 
     SessionMeta {
         id: session.id.clone(),
+        forked_from: session.forked_from.clone(),
         created_at: session.created_at,
         updated_at: session.updated_at,
         model: session.model.clone(),

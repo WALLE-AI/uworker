@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use agentrs_types::tool::ToolDef;
 
 use crate::Tool;
 
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 impl Default for ToolRegistry {
@@ -17,7 +19,15 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(Arc::from(tool));
+    }
+
+    pub fn register_shared(&mut self, tool: Arc<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    pub fn shared_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools.clone()
     }
 
     /// Find a tool by name

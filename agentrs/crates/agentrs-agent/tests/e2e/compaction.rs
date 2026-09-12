@@ -61,6 +61,7 @@ fn openai_config(api_key: &str) -> Config {
         logging: agentrs_config::logging::LoggingConfig::default(),
         tui: agentrs_config::tui::TuiConfig::default(),
         web: agentrs_config::web::WebConfig::default(),
+        subagent: Default::default(),
     }
 }
 

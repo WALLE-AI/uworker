@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::spawner::Spawner;
 use agentrs_config::hooks::HooksConfig;
@@ -93,6 +94,86 @@ impl SkillTool {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    async fn execute_with_cancel(&self, input: Value, cancel: CancellationToken) -> ToolResult {
+        self.execute_skill(input, cancel).await
+    }
+
+    async fn execute_skill(&self, input: Value, cancel: CancellationToken) -> ToolResult {
+        let Some(skill_name) = input["skill"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: skill".to_string(),
+                is_error: true,
+            };
+        };
+        let skill = match self.find_skill(skill_name) {
+            Some(skill) => skill,
+            None => {
+                return ToolResult {
+                    content: format!(
+                        "Skill '{}' not found. Available skills: {}",
+                        skill_name,
+                        self.available_names()
+                    ),
+                    is_error: true,
+                };
+            }
+        };
+        match self.checker.check(skill) {
+            SkillPermission::Deny => {
+                return ToolResult {
+                    content: format!("Skill '{}' is denied by configuration.", skill.name),
+                    is_error: true,
+                };
+            }
+            SkillPermission::Ask { reason } => {
+                return ToolResult {
+                    content: format!(
+                        "Skill '{}' requires user approval before execution. {} Please ask the user to approve this skill in their configuration.",
+                        skill.name, reason
+                    ),
+                    is_error: true,
+                };
+            }
+            SkillPermission::Allow => {}
+        }
+        let args = input["args"].as_str();
+        match skill.execution_context {
+            ExecutionContext::Inline => {
+                match prepare_inline_content(skill, args, self.session_id.as_deref(), &self.cwd).await {
+                    Ok(content) => ToolResult {
+                        content,
+                        is_error: false,
+                    },
+                    Err(error) => ToolResult {
+                        content: error.to_string(),
+                        is_error: true,
+                    },
+                }
+            }
+            ExecutionContext::Fork => {
+                let Some(spawner) = self.spawner.as_deref() else {
+                    return ToolResult {
+                        content: format!(
+                            "Skill '{}' requires fork execution context, but no AgentSpawner is available. Fork support is enabled via SkillTool::with_spawner().",
+                            skill.name
+                        ),
+                        is_error: true,
+                    };
+                };
+                match execute_fork(skill, args, self.session_id.as_deref(), &self.cwd, spawner, cancel).await {
+                    Ok(content) => ToolResult {
+                        content,
+                        is_error: false,
+                    },
+                    Err(error) => ToolResult {
+                        content: error,
+                        is_error: true,
+                    },
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -130,88 +211,11 @@ impl Tool for SkillTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(skill_name) = input["skill"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: skill".to_string(),
-                is_error: true,
-            };
-        };
+        self.execute_with_cancel(input, CancellationToken::new()).await
+    }
 
-        let skill = match self.find_skill(skill_name) {
-            Some(s) => s,
-            None => {
-                let available = self.available_names();
-                return ToolResult {
-                    content: format!("Skill '{}' not found. Available skills: {}", skill_name, available),
-                    is_error: true,
-                };
-            }
-        };
-
-        // Check skill-level permissions (applies to both inline and fork modes).
-        match self.checker.check(skill) {
-            SkillPermission::Deny => {
-                return ToolResult {
-                    content: format!("Skill '{}' is denied by configuration.", skill.name),
-                    is_error: true,
-                };
-            }
-            SkillPermission::Ask { reason } => {
-                return ToolResult {
-                    content: format!(
-                        "Skill '{}' requires user approval before execution. \
-                         {} \
-                         Please ask the user to approve this skill in their configuration.",
-                        skill.name, reason
-                    ),
-                    is_error: true,
-                };
-            }
-            SkillPermission::Allow => {}
-        }
-
-        let args = input["args"].as_str();
-
-        match skill.execution_context {
-            ExecutionContext::Inline => {
-                match prepare_inline_content(skill, args, self.session_id.as_deref(), &self.cwd).await {
-                    Ok(content) => ToolResult {
-                        content,
-                        is_error: false,
-                    },
-                    Err(e) => ToolResult {
-                        content: e.to_string(),
-                        is_error: true,
-                    },
-                }
-            }
-            ExecutionContext::Fork => {
-                let spawner = match self.spawner.as_ref() {
-                    Some(s) => s.as_ref(),
-                    None => {
-                        return ToolResult {
-                            content: format!(
-                                "Skill '{}' requires fork execution context, \
-                                 but no AgentSpawner is available. \
-                                 Fork support is enabled via SkillTool::with_spawner().",
-                                skill.name
-                            ),
-                            is_error: true,
-                        };
-                    }
-                };
-                match execute_fork(skill, args, self.session_id.as_deref(), &self.cwd, spawner).await {
-                    Ok(content) => ToolResult {
-                        content,
-                        is_error: false,
-                    },
-                    Err(e) => ToolResult {
-                        content: e,
-                        is_error: true,
-                    },
-                }
-            }
-        }
+    async fn execute_cancellable(&self, input: Value, cancel: CancellationToken) -> ToolResult {
+        self.execute_with_cancel(input, cancel).await
     }
 
     fn context_modifier_for(&self, input: &serde_json::Value) -> Option<ContextModifier> {

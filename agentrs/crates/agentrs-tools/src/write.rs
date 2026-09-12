@@ -8,10 +8,11 @@ use agentrs_protocol::events::ToolCategory;
 use agentrs_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 
 pub struct WriteTool {
-    file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    context: ToolContext,
 }
 
 impl WriteTool {
@@ -25,7 +26,11 @@ impl WriteTool {
     ///
     /// Pass `None` to disable cache integration (legacy behavior).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self::with_context(ToolContext::new(file_cache))
+    }
+
+    pub fn with_context(context: ToolContext) -> Self {
+        Self { context }
     }
 }
 
@@ -113,7 +118,7 @@ impl Tool for WriteTool {
                     is_error: true,
                 };
             }
-            if let Some(cache_arc) = &self.file_cache {
+            if let Some(cache_arc) = self.context.file_cache() {
                 update_cache_after_write(cache_arc, path, content);
             }
 
@@ -123,7 +128,7 @@ impl Tool for WriteTool {
             };
         }
 
-        if let Some(cache_arc) = &self.file_cache {
+        if let Some(cache_arc) = self.context.file_cache() {
             update_cache_after_write(cache_arc, path, content);
         }
 

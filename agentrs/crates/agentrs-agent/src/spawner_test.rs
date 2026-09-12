@@ -3,8 +3,9 @@ use super::*;
 #[cfg(test)]
 mod phase7_tests {
     use agentrs_config::config::{CliArgs, Config};
+    use agentrs_types::message::TokenUsage;
 
-    use super::{ForkOverrides, SubAgentConfig, ToolPolicy, build_tool_registry, effective_child_tool_policy};
+    use super::{ForkOverrides, SubAgentSpec, ToolPolicy, build_tool_registry, child_policy, usage_delta};
 
     fn test_config() -> Config {
         Config::resolve(&CliArgs {
@@ -35,11 +36,33 @@ mod phase7_tests {
     }
 
     #[test]
+    fn resumed_agent_reports_only_incremental_usage() {
+        let baseline = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 40,
+            cache_creation_tokens: 10,
+            cache_read_tokens: 20,
+        };
+        let total = TokenUsage {
+            input_tokens: 130,
+            output_tokens: 55,
+            cache_creation_tokens: 12,
+            cache_read_tokens: 27,
+        };
+        let delta = usage_delta(&total, &baseline);
+        assert_eq!(delta.input_tokens, 30);
+        assert_eq!(delta.output_tokens, 15);
+        assert_eq!(delta.cache_creation_tokens, 2);
+        assert_eq!(delta.cache_read_tokens, 7);
+    }
+
+    #[test]
     fn tc_7_40_build_tool_registry_unrestricted_registers_all() {
         let (registry, _) = build_tool_registry(&ToolPolicy::Unrestricted, &test_config(), &std::env::temp_dir(), &[]);
         for name in &["Read", "Write", "Edit", "ExecCommand", "Grep", "Glob", "TodoWrite"] {
             assert!(registry.get(name).is_some(), "tool '{name}' should be registered");
         }
+        assert!(ToolPolicy::Unrestricted.allows("ToolSearch"));
     }
 
     #[test]
@@ -56,7 +79,7 @@ mod phase7_tests {
         let parent = ToolPolicy::allow_only(["Read", "Grep", "Spawn"]);
         let allowed_tools = vec!["Read".to_string(), "ExecCommand".to_string()];
 
-        let child = effective_child_tool_policy(&parent, &allowed_tools);
+        let child = child_policy(&parent, &allowed_tools);
 
         assert!(child.allows("Read"));
         assert!(!child.allows("Grep"));
@@ -68,22 +91,27 @@ mod phase7_tests {
     fn empty_fork_override_inherits_parent_policy() {
         let parent = ToolPolicy::allow_only(["Read", "Grep", "Spawn"]);
 
-        let child = effective_child_tool_policy(&parent, &[]);
+        let child = child_policy(&parent, &[]);
 
         assert_eq!(child, parent);
     }
 
     #[test]
     fn tc_7_sub_agent_config_original_fields_intact() {
-        let config = SubAgentConfig {
+        let config = SubAgentSpec {
             name: "test-agent".to_string(),
+            agent_type: None,
             prompt: "do the task".to_string(),
-            max_turns: 5,
-            max_tokens: 1024,
+            max_turns: Some(5),
+            max_tokens: Some(1024),
             system_prompt: Some("you are helpful".to_string()),
+            depth: 0,
+            resume: None,
+            persistent: false,
+            isolation: Default::default(),
         };
         assert_eq!(config.name, "test-agent");
-        assert_eq!(config.max_turns, 5);
+        assert_eq!(config.max_turns, Some(5));
     }
 
     // --- TC-3.0-05: a child cannot regain a tool the parent was denied ---
@@ -93,7 +121,7 @@ mod phase7_tests {
         let parent = ToolPolicy::allow_only(["Read", "WebSearch"]);
         let requested = vec!["Read".to_string(), "WebFetch".to_string(), "WebSearch".to_string()];
 
-        let child = effective_child_tool_policy(&parent, &requested);
+        let child = child_policy(&parent, &requested);
 
         assert!(child.allows("Read"));
         assert!(child.allows("WebSearch"));
@@ -107,7 +135,7 @@ mod phase7_tests {
     fn a_child_with_no_overrides_inherits_the_parent_network_restrictions() {
         let parent = ToolPolicy::allow_only(["Read"]);
 
-        let child = effective_child_tool_policy(&parent, &[]);
+        let child = child_policy(&parent, &[]);
 
         assert!(!child.allows("WebFetch"));
         assert!(!child.allows("WebSearch"));

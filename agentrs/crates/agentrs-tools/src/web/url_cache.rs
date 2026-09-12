@@ -99,10 +99,7 @@ impl UrlCache {
 
     pub fn get(&mut self, url: &str) -> Option<CachedResponse> {
         let now = self.clock.now();
-        let expired = match self.entries.get(url) {
-            Some(entry) => now.saturating_sub(entry.stored_at) >= self.ttl,
-            None => return None,
-        };
+        let expired = now.saturating_sub(self.entries.get(url)?.stored_at) >= self.ttl;
         if expired {
             self.remove(url);
             return None;

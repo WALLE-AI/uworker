@@ -9,6 +9,7 @@ use agentrs_types::file_state::FileState;
 use agentrs_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, file_mtime_ms};
 
 /// Stub returned when a file has not changed since the model last read it.
@@ -18,7 +19,7 @@ const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The content f
      instead of re-reading.";
 
 pub struct ReadTool {
-    file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    context: ToolContext,
 }
 
 impl ReadTool {
@@ -26,7 +27,11 @@ impl ReadTool {
     ///
     /// Pass `None` to disable caching (all reads return full content).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self::with_context(ToolContext::new(file_cache))
+    }
+
+    pub fn with_context(context: ToolContext) -> Self {
+        Self { context }
     }
 }
 
@@ -87,7 +92,7 @@ impl Tool for ReadTool {
 
         // Dedup check: if cache has the same file with matching offset/limit and mtime,
         // return a short stub instead of full content.
-        if let (Some(cache_arc), Some(current_mtime)) = (&self.file_cache, mtime_ms)
+        if let (Some(cache_arc), Some(current_mtime)) = (self.context.file_cache(), mtime_ms)
             && let Ok(mut cache) = cache_arc.write()
             && let Some(cached) = cache.get(Path::new(file_path))
             && cached.offset == offset
@@ -137,7 +142,7 @@ impl Tool for ReadTool {
         let result_content = numbered.join("\n");
 
         // Update cache after successful read.
-        if let Some(cache_arc) = &self.file_cache
+        if let Some(cache_arc) = self.context.file_cache()
             && let (Ok(mut cache), Some(mtime)) = (cache_arc.write(), mtime_ms)
         {
             cache.insert(

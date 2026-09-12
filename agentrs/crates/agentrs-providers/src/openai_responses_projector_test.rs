@@ -14,6 +14,7 @@ mod tests {
             messages,
             tools,
             max_tokens: Some(4096),
+            temperature: None,
             thinking: None,
             reasoning_effort: Some("high".to_string()),
         }

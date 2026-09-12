@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use agentrs_config::compat::ProviderCompat;
-use agentrs_protocol::events::{Capabilities, ErrorInfo, ProtocolEvent, TodoSnapshot, Usage};
+use agentrs_protocol::events::{Capabilities, ErrorInfo, ProtocolEvent, SubAgentEventStatus, TodoSnapshot, Usage};
 use agentrs_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 use super::OutputSink;
@@ -139,5 +139,32 @@ impl OutputSink for ProtocolSink {
 
     fn emit_todo_update(&self, todos: &[TodoSnapshot]) {
         let _ = self.writer.emit(&ProtocolEvent::TodoUpdated { todos: todos.to_vec() });
+    }
+
+    fn emit_subagent_started(&self, id: &str, name: &str, parent_msg_id: &str, depth: usize) {
+        let _ = self.writer.emit(&ProtocolEvent::SubAgentStarted {
+            id: id.to_string(),
+            name: name.to_string(),
+            parent_msg_id: parent_msg_id.to_string(),
+            depth,
+        });
+    }
+
+    fn emit_subagent_progress(&self, id: &str, status: SubAgentEventStatus, turns: usize, usage: Usage) {
+        let _ = self.writer.emit(&ProtocolEvent::SubAgentProgress {
+            id: id.to_string(),
+            status,
+            turns,
+            usage,
+        });
+    }
+
+    fn emit_subagent_finished(&self, id: &str, status: SubAgentEventStatus, turns: usize, usage: Usage) {
+        let _ = self.writer.emit(&ProtocolEvent::SubAgentFinished {
+            id: id.to_string(),
+            status,
+            turns,
+            usage,
+        });
     }
 }

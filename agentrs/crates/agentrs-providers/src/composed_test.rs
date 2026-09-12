@@ -27,6 +27,7 @@ mod tests {
             )],
             tools: vec![],
             max_tokens: Some(8192),
+            temperature: None,
             thinking: None,
             reasoning_effort: None,
         }
@@ -60,6 +61,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             max_tokens: Some(1024),
+            temperature: None,
             thinking: None,
             reasoning_effort: None,
         };
@@ -86,6 +88,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             max_tokens: Some(2048),
+            temperature: None,
             thinking: None,
             reasoning_effort: None,
         };
@@ -112,6 +115,7 @@ mod tests {
                 deferred: false,
             }],
             max_tokens: Some(1024),
+            temperature: None,
             thinking: None,
             reasoning_effort: None,
         };
@@ -143,6 +147,7 @@ mod tests {
             messages,
             tools,
             max_tokens: Some(8192),
+            temperature: None,
             thinking: None,
             reasoning_effort: None,
         }

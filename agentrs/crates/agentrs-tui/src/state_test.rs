@@ -1,5 +1,5 @@
 use agentrs_agent::commands::CommandSpec;
-use agentrs_protocol::events::TodoSnapshot;
+use agentrs_protocol::events::{SubAgentEventStatus, TodoSnapshot};
 use agentrs_types::compact::{CompactMetadata, CompactTrigger};
 use agentrs_types::message::{ContentBlock, Message, Role};
 
@@ -489,4 +489,36 @@ fn a_new_session_starts_without_a_checklist() {
     state.reset_session("m".to_string(), "p".to_string(), None, &[]);
 
     assert!(state.todos.is_empty(), "a fresh session must not inherit the old plan");
+}
+
+#[test]
+fn subagent_lifecycle_is_visible_with_depth_turns_and_tokens() {
+    let mut state = state();
+    state.handle_agent_event(AgentEvent::SubAgentStarted {
+        id: "0199abcdef012345".into(),
+        name: "explore-api".into(),
+        depth: 2,
+    });
+    state.handle_agent_event(AgentEvent::SubAgentProgress {
+        id: "0199abcdef012345".into(),
+        status: SubAgentEventStatus::Running,
+        turns: 3,
+        output_tokens: 144,
+    });
+    state.handle_agent_event(AgentEvent::SubAgentFinished {
+        id: "0199abcdef012345".into(),
+        status: SubAgentEventStatus::Finished,
+        turns: 4,
+        output_tokens: 233,
+    });
+
+    let rendered = state
+        .transcript
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("explore-api started (0199abcd..., depth 2)"));
+    assert!(rendered.contains("Running, 3 turns, 144 output tokens"));
+    assert!(rendered.contains("Finished, 4 turns, 233 output tokens"));
 }

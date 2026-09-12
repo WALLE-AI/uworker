@@ -2,24 +2,61 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
-use crate::spawner::{AgentSpawner, SubAgentConfig};
+use crate::spawner::{AgentSpawner, SubAgentId, SubAgentIsolation, SubAgentSpec, SubAgentStatus};
 use agentrs_protocol::events::ToolCategory;
 use agentrs_types::tool::{JsonSchema, ToolResult};
 
 use agentrs_tools::Tool;
 
-const DEFAULT_SUB_AGENT_MAX_TURNS: usize = 200;
-const DEFAULT_SUB_AGENT_MAX_TOKENS: u32 = 4096;
-const MAX_SUB_AGENTS: usize = 5;
-
 pub struct SpawnTool {
     spawner: Arc<AgentSpawner>,
+    depth: usize,
 }
 
 impl SpawnTool {
     pub fn new(spawner: Arc<AgentSpawner>) -> Self {
-        Self { spawner }
+        Self { spawner, depth: 0 }
+    }
+
+    pub(crate) fn for_depth(spawner: Arc<AgentSpawner>, depth: usize) -> Self {
+        Self { spawner, depth }
+    }
+
+    async fn execute_with_cancel(&self, input: Value, cancel: CancellationToken) -> ToolResult {
+        let tasks = match parse_tasks(&input, self.depth) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                return ToolResult {
+                    content: error,
+                    is_error: true,
+                };
+            }
+        };
+        if tasks.is_empty() {
+            return ToolResult {
+                content: "No tasks provided".to_string(),
+                is_error: true,
+            };
+        }
+        if tasks.len() > self.spawner.max_per_call() {
+            return ToolResult {
+                content: format!(
+                    "Too many sub-agents: {} (max {})",
+                    tasks.len(),
+                    self.spawner.max_per_call()
+                ),
+                is_error: true,
+            };
+        }
+
+        let results = self.spawner.spawn_parallel(tasks, cancel).await;
+        let output = results.iter().map(render_result).collect::<Vec<_>>().join("\n");
+        ToolResult {
+            content: output,
+            is_error: results.iter().all(|result| result.status.is_error()),
+        }
     }
 }
 
@@ -56,6 +93,19 @@ impl Tool for SpawnTool {
                             "prompt": {
                                 "type": "string",
                                 "description": "The task description / prompt for the sub-agent"
+                            },
+                            "agent_type": {
+                                "type": "string",
+                                "description": "Optional agent definition name from the system prompt"
+                            },
+                            "task_id": {
+                                "type": "string",
+                                "description": "Optional existing sub-agent id to resume"
+                            },
+                            "isolation": {
+                                "type": "string",
+                                "enum": ["shared", "worktree"],
+                                "description": "Run in the shared workspace or an isolated Git worktree"
                             }
                         },
                         "required": ["name", "prompt"]
@@ -75,49 +125,11 @@ impl Tool for SpawnTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let tasks = match parse_tasks(&input) {
-            Ok(tasks) => tasks,
-            Err(e) => {
-                return ToolResult {
-                    content: e,
-                    is_error: true,
-                };
-            }
-        };
+        self.execute_with_cancel(input, CancellationToken::new()).await
+    }
 
-        if tasks.is_empty() {
-            return ToolResult {
-                content: "No tasks provided".to_string(),
-                is_error: true,
-            };
-        }
-
-        if tasks.len() > MAX_SUB_AGENTS {
-            return ToolResult {
-                content: format!("Too many sub-agents: {} (max {})", tasks.len(), MAX_SUB_AGENTS),
-                is_error: true,
-            };
-        }
-
-        let results = self.spawner.spawn_parallel(tasks).await;
-
-        let output: Vec<String> = results
-            .iter()
-            .map(|r| {
-                let status = if r.is_error { "ERROR" } else { "OK" };
-                format!(
-                    "## {} [{}]\n{}\n[turns: {} | tokens: {} in / {} out]",
-                    r.name, status, r.text, r.turns, r.usage.input_tokens, r.usage.output_tokens
-                )
-            })
-            .collect();
-
-        let all_error = results.iter().all(|r| r.is_error);
-
-        ToolResult {
-            content: output.join("\n\n---\n\n"),
-            is_error: all_error,
-        }
+    async fn execute_cancellable(&self, input: Value, cancel: CancellationToken) -> ToolResult {
+        self.execute_with_cancel(input, cancel).await
     }
 
     fn category(&self) -> ToolCategory {
@@ -125,12 +137,22 @@ impl Tool for SpawnTool {
     }
 
     fn describe(&self, input: &Value) -> String {
-        let task = input.get("task").and_then(|v| v.as_str()).unwrap_or("sub-agent");
-        format!("Spawn: {}", agentrs_tools::truncate_utf8(task, 80))
+        let names = input
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|task| task.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return "Spawn: 0 sub-tasks".to_string();
+        }
+        let description = format!("Spawn: {} sub-tasks ({})", names.len(), names.join(", "));
+        agentrs_tools::truncate_utf8(&description, 120).to_string()
     }
 }
 
-fn parse_tasks(input: &Value) -> Result<Vec<SubAgentConfig>, String> {
+fn parse_tasks(input: &Value, depth: usize) -> Result<Vec<SubAgentSpec>, String> {
     let tasks_arr = input["tasks"].as_array().ok_or("Missing or invalid 'tasks' array")?;
 
     let mut configs = Vec::new();
@@ -144,14 +166,52 @@ fn parse_tasks(input: &Value) -> Result<Vec<SubAgentConfig>, String> {
             .ok_or("Each task must have a 'prompt' string")?
             .to_string();
 
-        configs.push(SubAgentConfig {
+        configs.push(SubAgentSpec {
             name,
+            agent_type: task.get("agent_type").and_then(Value::as_str).map(str::to_string),
             prompt,
-            max_turns: DEFAULT_SUB_AGENT_MAX_TURNS,
-            max_tokens: DEFAULT_SUB_AGENT_MAX_TOKENS,
+            max_turns: None,
+            max_tokens: None,
             system_prompt: None,
+            depth,
+            resume: task.get("task_id").and_then(Value::as_str).map(SubAgentId::new),
+            persistent: false,
+            isolation: match task.get("isolation").and_then(Value::as_str) {
+                None | Some("shared") => SubAgentIsolation::Shared,
+                Some("worktree") => SubAgentIsolation::Worktree,
+                Some(other) => return Err(format!("Invalid sub-agent isolation mode: {other}")),
+            },
         });
     }
 
     Ok(configs)
+}
+
+fn render_result(result: &crate::spawner::SubAgentResult) -> String {
+    let status = match result.status {
+        SubAgentStatus::Finished | SubAgentStatus::Idle => "completed",
+        SubAgentStatus::Cancelled => "cancelled",
+        SubAgentStatus::Pending | SubAgentStatus::Running | SubAgentStatus::Failed => "error",
+    };
+    let text = agentrs_tools::truncate_utf8(&result.text, 100_000);
+    let summary = text.lines().next().unwrap_or_default();
+    format!(
+        "<subagent id=\"{}\" name=\"{}\" status=\"{}\">\n<summary>{}</summary>\n<result>{}</result>\n<usage turns=\"{}\" input=\"{}\" output=\"{}\" />\n</subagent>",
+        escape_xml(result.id.as_str()),
+        escape_xml(&result.name),
+        status,
+        escape_xml(summary),
+        escape_xml(text),
+        result.turns,
+        result.usage.input_tokens,
+        result.usage.output_tokens,
+    )
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
