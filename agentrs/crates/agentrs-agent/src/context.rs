@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use agentrs_config::shell::{ResolvedShell, default_shell, render_shell_prompt};
-use agentrs_memory::prompt::build_memory_prompt_minimal;
+use agentrs_memory::prompt::{build_memory_prompt, build_memory_prompt_minimal};
 use agentrs_skills::prompt::format_skills_within_budget;
 use agentrs_skills::types::SkillMetadata;
 use agentrs_types::message::{ContentBlock, Message, Role};
@@ -29,6 +29,8 @@ pub struct SystemPromptCache {
     pub(crate) last_shell_prompt: Option<String>,
     /// Track runtime tool authorization to keep guidance and skill reminders aligned.
     pub(crate) last_tool_policy: ToolPolicy,
+    /// Upgrades once the model first writes into the memory directory.
+    pub(crate) memory_full_instructions: bool,
 }
 
 impl SystemPromptCache {
@@ -40,6 +42,7 @@ impl SystemPromptCache {
             last_toon_enabled: false,
             last_shell_prompt: None,
             last_tool_policy: ToolPolicy::default(),
+            memory_full_instructions: false,
         }
     }
 
@@ -282,10 +285,14 @@ pub(crate) fn build_system_prompt_with_shell_and_tool_policy(
     // Uses the minimal prompt to save ~2,500 tokens — omits full type taxonomy
     // and examples. The full instructions are available via build_memory_prompt().
     if let Some(dir) = memory_dir {
-        let memory_section = cache
-            .sections
-            .entry("memory")
-            .or_insert_with(|| build_memory_prompt_minimal(dir));
+        let full = cache.memory_full_instructions;
+        let memory_section = cache.sections.entry("memory").or_insert_with(|| {
+            if full {
+                build_memory_prompt(dir)
+            } else {
+                build_memory_prompt_minimal(dir)
+            }
+        });
         if !memory_section.is_empty() {
             parts.push(memory_section.clone());
         }

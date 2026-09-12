@@ -224,8 +224,9 @@ mod tests {
             description: Some("User role info".into()),
             memory_type: Some(MemoryType::User),
         }];
-        let manifest = format_memory_manifest(&headers);
-        assert_eq!(manifest, "- [user] user_role.md (2026-04-10T12:00:00): User role info");
+        let now = Utc.with_ymd_and_hms(2026, 4, 12, 12, 0, 0).unwrap();
+        let manifest = format_memory_manifest_at(&headers, now);
+        assert_eq!(manifest, "- [user] user_role.md (2 days ago): User role info");
     }
 
     #[test]
@@ -237,8 +238,9 @@ mod tests {
             description: None,
             memory_type: None,
         }];
-        let manifest = format_memory_manifest(&headers);
-        assert_eq!(manifest, "- notes.md (2026-01-01T00:00:00)");
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let manifest = format_memory_manifest_at(&headers, now);
+        assert_eq!(manifest, "- notes.md (today)");
     }
 
     #[test]

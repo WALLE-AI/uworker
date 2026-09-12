@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
 
+use crate::age::memory_age;
 use crate::error::Result;
 use crate::paths::ENTRYPOINT_NAME;
 use crate::types::{MemoryEntry, MemoryFrontmatter, MemoryHeader};
@@ -115,11 +116,15 @@ pub fn scan_memory_files(dir: &Path) -> Result<Vec<MemoryHeader>> {
 /// Each line: `- [type] filename (ISO8601): description`
 /// Type tag omitted if absent; description omitted if absent.
 pub fn format_memory_manifest(headers: &[MemoryHeader]) -> String {
+    format_memory_manifest_at(headers, Utc::now())
+}
+
+fn format_memory_manifest_at(headers: &[MemoryHeader], now: DateTime<Utc>) -> String {
     let mut lines = Vec::with_capacity(headers.len());
 
     for h in headers {
         let type_tag = h.memory_type.map(|t| format!("[{}] ", t)).unwrap_or_default();
-        let ts = h.mtime.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let ts = memory_age(h.mtime, now);
         let desc = h.description.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
 
         lines.push(format!("- {type_tag}{} ({ts}){desc}", h.filename));

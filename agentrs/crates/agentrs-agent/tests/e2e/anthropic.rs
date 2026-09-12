@@ -56,6 +56,7 @@ fn anthropic_config(api_key: &str) -> Config {
         web: agentrs_config::web::WebConfig::default(),
         subagent: Default::default(),
         team: Default::default(),
+        memory: Default::default(),
     }
 }
 

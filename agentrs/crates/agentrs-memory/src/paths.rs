@@ -53,8 +53,13 @@ pub fn memory_base_dir() -> Option<PathBuf> {
 /// are truncated with a hash suffix for uniqueness.
 pub fn auto_memory_dir(project_root: &Path) -> Option<PathBuf> {
     let base = memory_base_dir()?;
+    Some(auto_memory_dir_from_base(project_root, &base))
+}
+
+/// Resolve a project memory directory beneath an explicit base directory.
+pub fn auto_memory_dir_from_base(project_root: &Path, base: &Path) -> PathBuf {
     let sanitized = sanitize_path(&project_root.to_string_lossy());
-    Some(base.join("projects").join(sanitized).join("memory"))
+    base.join("projects").join(sanitized).join("memory")
 }
 
 // ---------------------------------------------------------------------------
@@ -142,21 +147,25 @@ pub fn validate_memory_path(path: &Path) -> Result<PathBuf> {
 
 /// Make a string safe for use as a directory name.
 ///
-/// Replaces all non-alphanumeric characters with hyphens. If the result
-/// exceeds `MAX_SANITIZED_LENGTH`, truncates and appends a hash suffix
-/// to preserve uniqueness.
+/// Replaces all non-alphanumeric characters with hyphens and always appends a
+/// hash of the original value. This keeps non-ASCII paths that sanitize to the
+/// same text isolated from one another.
 pub fn sanitize_path(name: &str) -> String {
-    let sanitized: String = name
+    let mut sanitized: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-
-    if sanitized.len() <= MAX_SANITIZED_LENGTH {
-        return sanitized;
+    if sanitized.len() > MAX_SANITIZED_LENGTH {
+        sanitized.truncate(MAX_SANITIZED_LENGTH);
     }
-
     let hash = simple_hash(name);
-    format!("{}-{hash}", &sanitized[..MAX_SANITIZED_LENGTH])
+    format!("{sanitized}-{hash}")
+}
+
+/// Whether memory storage uses the platform default instead of an explicit
+/// environment override.
+pub fn is_default_memory_dir() -> bool {
+    std::env::var(MEMORY_DIR_ENV).map_or(true, |value| value.is_empty())
 }
 
 // ---------------------------------------------------------------------------

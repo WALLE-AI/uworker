@@ -16,6 +16,7 @@ use crate::context_usage::{
     estimate_tool_definitions_tokens,
 };
 use crate::error::AgentError;
+use crate::memory::watch::{observe_memory_writes, record_memory_reads};
 use crate::orchestration::{
     ExecutionControl, execute_tool_calls_with_approval_and_output_limit, execute_tool_calls_with_output_limit,
 };
@@ -39,6 +40,8 @@ use agentrs_config::compact::CompactConfig;
 use agentrs_config::compat::ProviderCompat;
 use agentrs_config::config::{CompactContextWindowSource, Config};
 use agentrs_config::hooks::HookEngine;
+use agentrs_memory::paths::ENTRYPOINT_NAME;
+use agentrs_memory::prompt::{build_memory_prompt, build_memory_prompt_minimal};
 use agentrs_protocol::ToolApprovalManager;
 use agentrs_protocol::events::ToolCategory;
 use agentrs_protocol::writer::ProtocolEmitter;
@@ -140,6 +143,12 @@ pub struct AgentEngine {
     session_manager: Option<SessionManager>,
     /// Active session record updated as the conversation progresses.
     current_session: Option<Session>,
+
+    // Long-term memory prompt state.
+    memory_dir: Option<PathBuf>,
+    memory_prompt: Option<String>,
+    memory_full_instructions: bool,
+    memory_written_this_turn: bool,
 
     // Output and host protocol integration.
     /// Sink for user-visible and host-visible output events.
@@ -260,6 +269,10 @@ impl AgentEngine {
             team_inbox: None,
             session_manager,
             current_session: None,
+            memory_dir: None,
+            memory_prompt: None,
+            memory_full_instructions: false,
+            memory_written_this_turn: false,
             output,
             approval_manager: None,
             protocol_writer: None,
@@ -370,6 +383,10 @@ impl AgentEngine {
             team_inbox: None,
             session_manager,
             current_session: Some(session),
+            memory_dir: None,
+            memory_prompt: None,
+            memory_full_instructions: false,
+            memory_written_this_turn: false,
             output,
             approval_manager: None,
             protocol_writer: None,
@@ -426,6 +443,11 @@ impl AgentEngine {
     /// Replace bootstrap-derived prompt category metadata.
     pub(crate) fn set_prompt_usage(&mut self, prompt_usage: PromptUsage) {
         self.prompt_usage = prompt_usage;
+    }
+
+    pub(crate) fn set_memory_runtime(&mut self, memory_dir: Option<PathBuf>) {
+        self.memory_prompt = memory_dir.as_deref().map(build_memory_prompt_minimal);
+        self.memory_dir = memory_dir;
     }
 
     /// Get the current session ID (if sessions are enabled and initialized)
@@ -574,6 +596,7 @@ impl AgentEngine {
         msg_id: &str,
     ) -> Result<AgentResult, AgentError> {
         self.reset_turn_cancel();
+        self.memory_written_this_turn = false;
         if let Some(todo) = &self.todo {
             todo.on_user_turn_start();
         }
@@ -698,6 +721,17 @@ impl AgentEngine {
                 all_tool_results_error,
             } = self.execute_tool_round(&tool_calls).await?;
 
+            record_memory_reads(&tool_calls, self.memory_dir.as_deref());
+            if let Some(observation) =
+                observe_memory_writes(&tool_calls, self.memory_dir.as_deref(), self.memory_full_instructions)
+            {
+                self.memory_written_this_turn = true;
+                if observation.first_write {
+                    self.memory_full_instructions = true;
+                }
+                self.refresh_memory_prompt();
+            }
+
             // Apply any context modifiers from skill executions before the next turn.
             self.apply_context_modifiers(&tool_modifiers);
 
@@ -733,6 +767,28 @@ impl AgentEngine {
                 TurnGuardAction::Stop(err) => return Err(err),
             }
         }
+    }
+
+    fn refresh_memory_prompt(&mut self) {
+        let Some(directory) = self.memory_dir.as_deref() else {
+            return;
+        };
+        let next = if self.memory_full_instructions {
+            build_memory_prompt(directory)
+        } else {
+            build_memory_prompt_minimal(directory)
+        };
+        if let Some(previous) = self.memory_prompt.replace(next.clone()) {
+            self.system_prompt = self.system_prompt.replacen(&previous, &next, 1);
+        }
+        self.prompt_usage.memory_tokens = estimate_text_tokens(&next);
+        self.prompt_usage.memory_files = directory
+            .join(ENTRYPOINT_NAME)
+            .is_file()
+            .then(|| directory.join(ENTRYPOINT_NAME).display().to_string())
+            .into_iter()
+            .collect();
+        self.refresh_local_context_estimate();
     }
 
     /// Build the next provider request, applying plan-mode tool/system filtering

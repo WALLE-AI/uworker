@@ -8,7 +8,9 @@
 // The index has hard caps (lines and bytes) to prevent unbounded growth.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::Result;
 use crate::types::IndexTruncation;
@@ -18,6 +20,9 @@ pub const MAX_INDEX_LINES: usize = 200;
 
 /// Maximum byte count before truncation (~25 KB).
 pub const MAX_INDEX_BYTES: usize = 25_000;
+
+static INDEX_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Read
@@ -129,6 +134,7 @@ pub fn truncate_index(raw: &str) -> IndexTruncation {
 /// Creates the file (and parent directories) if it doesn't exist.
 /// Ensures a newline separator before the new entry.
 pub fn append_index_entry(path: &Path, title: &str, filename: &str, summary: &str) -> Result<()> {
+    let _guard = INDEX_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -142,8 +148,7 @@ pub fn append_index_entry(path: &Path, title: &str, filename: &str, summary: &st
     content.push_str(&entry);
     content.push('\n');
 
-    fs::write(path, content)?;
-    Ok(())
+    replace_file(path, content.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -156,14 +161,17 @@ pub fn append_index_entry(path: &Path, title: &str, filename: &str, summary: &st
 /// Idempotent — silently succeeds if the file doesn't exist or the
 /// entry is not found.
 pub fn remove_index_entry(path: &Path, filename: &str) -> Result<()> {
+    let _guard = INDEX_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
 
-    let needle = format!("({filename})");
-    let filtered: Vec<&str> = content.lines().filter(|line| !line.contains(&needle)).collect();
+    let filtered: Vec<&str> = content
+        .lines()
+        .filter(|line| linked_filename(line) != Some(filename))
+        .collect();
 
     // Preserve trailing newline if original had one
     let mut result = filtered.join("\n");
@@ -171,8 +179,7 @@ pub fn remove_index_entry(path: &Path, filename: &str) -> Result<()> {
         result.push('\n');
     }
 
-    fs::write(path, result)?;
-    Ok(())
+    replace_file(path, result.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +194,38 @@ fn format_size(bytes: usize) -> String {
         let kb = bytes as f64 / 1024.0;
         format!("{kb:.1} KB")
     }
+}
+
+fn linked_filename(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if !line.starts_with("- [") {
+        return None;
+    }
+    let target_start = line.find("](")? + 2;
+    let target_end = line[target_start..].find(')')? + target_start;
+    Some(&line[target_start..target_end])
+}
+
+fn replace_file(path: &Path, content: &[u8]) -> Result<()> {
+    let temp_path = temporary_path(path);
+    fs::write(&temp_path, content)?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    match fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error.into())
+        }
+    }
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("MEMORY.md");
+    path.with_file_name(format!(".{filename}.{}.{}.tmp", std::process::id(), sequence))
 }
 
 #[cfg(test)]

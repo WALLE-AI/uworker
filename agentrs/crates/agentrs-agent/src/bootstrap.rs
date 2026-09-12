@@ -8,7 +8,7 @@ use agentrs_config::shell::{ResolvedShell, resolve_shell_config};
 use agentrs_config::todo::TodoMode;
 use agentrs_mcp::manager::McpManager;
 use agentrs_mcp::tool_proxy::register_mcp_tools;
-use agentrs_memory::paths::{ENTRYPOINT_NAME, auto_memory_dir};
+use agentrs_memory::paths::{ENTRYPOINT_NAME, auto_memory_dir, auto_memory_dir_from_base, ensure_memory_dir};
 use agentrs_providers::{LlmProvider, create_provider};
 use agentrs_skills::loader::load_all_skills;
 use agentrs_skills::permissions::SkillPermissionChecker;
@@ -206,6 +206,7 @@ impl AgentBootstrap {
             prompt_usage,
         );
         engine.set_subagent_runtime(subagent_registry.registry, subagent_registry.parent_session);
+        engine.set_memory_runtime(environment.memory_dir.clone());
         if let Some(inbox) = subagent_registry.team_inbox {
             engine.set_team_inbox(inbox);
         }
@@ -229,9 +230,23 @@ impl AgentBootstrap {
     }
 
     fn resolve_environment(&self, workspace_path: PathBuf) -> Result<BootstrapEnvironment> {
+        let requested_memory_dir = if !self.config.memory.enabled {
+            None
+        } else if let Some(base) = &self.config.memory.dir {
+            Some(auto_memory_dir_from_base(&workspace_path, base))
+        } else {
+            auto_memory_dir(&workspace_path)
+        };
+        let memory_dir = requested_memory_dir.and_then(|directory| match ensure_memory_dir(&directory) {
+            Ok(()) => Some(directory),
+            Err(error) => {
+                tracing::warn!(target: "agentrs_memory", %error, "memory directory unavailable; memory disabled for this session");
+                None
+            }
+        });
         Ok(BootstrapEnvironment {
             resolved_shell: resolve_shell_config(&self.config.shell)?,
-            memory_dir: auto_memory_dir(&workspace_path),
+            memory_dir,
             workspace: workspace_path,
         })
     }

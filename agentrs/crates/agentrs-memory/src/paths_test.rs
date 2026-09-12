@@ -14,17 +14,18 @@ mod tests {
 
     #[test]
     fn sanitize_simple_path() {
-        assert_eq!(sanitize_path("/home/user/project"), "-home-user-project");
+        let result = sanitize_path("/home/user/project");
+        assert!(result.starts_with("-home-user-project-"));
     }
 
     #[test]
     fn sanitize_preserves_alphanumeric() {
-        assert_eq!(sanitize_path("abc123"), "abc123");
+        assert!(sanitize_path("abc123").starts_with("abc123-"));
     }
 
     #[test]
     fn sanitize_replaces_special_chars() {
-        assert_eq!(sanitize_path("a/b:c d"), "a-b-c-d");
+        assert!(sanitize_path("a/b:c d").starts_with("a-b-c-d-"));
     }
 
     #[test]
@@ -41,6 +42,11 @@ mod tests {
         let path_a = "/".to_string() + &"a".repeat(300);
         let path_b = "/".to_string() + &"b".repeat(300);
         assert_ne!(sanitize_path(&path_a), sanitize_path(&path_b));
+    }
+
+    #[test]
+    fn sanitize_non_ascii_paths_do_not_collide() {
+        assert_ne!(sanitize_path("/home/张三/proj"), sanitize_path("/home/李四/proj"));
     }
 
     // -- contains_traversal ---------------------------------------------------
@@ -233,7 +239,10 @@ mod tests {
         // SAFETY: #[serial(env)] ensures no concurrent env mutation.
         unsafe { std::env::set_var(key, "/base") };
         let dir = auto_memory_dir(Path::new("/home/user/project")).unwrap();
-        assert_eq!(dir, PathBuf::from("/base/projects/-home-user-project/memory"));
+        let expected = PathBuf::from("/base/projects")
+            .join(sanitize_path("/home/user/project"))
+            .join("memory");
+        assert_eq!(dir, expected);
 
         restore_env(key, original);
     }

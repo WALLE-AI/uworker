@@ -289,6 +289,40 @@ mod tests {
         assert_eq!(content, "");
     }
 
+    #[test]
+    fn remove_matches_the_exact_markdown_link_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MEMORY.md");
+        fs::write(&path, "- [A](a.md) — first\n- [XA](xa.md) — second\n").unwrap();
+
+        remove_index_entry(&path, "a.md").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "- [XA](xa.md) — second\n");
+    }
+
+    #[test]
+    fn concurrent_appends_preserve_every_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(tmp.path().join("MEMORY.md"));
+        let threads = (0..16)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    append_index_entry(&path, &format!("Title {index}"), &format!("{index}.md"), "summary").unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let content = fs::read_to_string(path.as_ref()).unwrap();
+        assert_eq!(content.lines().count(), 16);
+        for index in 0..16 {
+            assert!(content.contains(&format!("]({index}.md)")));
+        }
+    }
+
     // -- read_index (unit-level) ----------------------------------------------
 
     #[test]

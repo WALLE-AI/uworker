@@ -3,6 +3,7 @@
 // Provides cross-session storage of user preferences, feedback,
 // project context, and external references.
 
+pub mod age;
 pub mod error;
 pub mod index;
 pub mod paths;

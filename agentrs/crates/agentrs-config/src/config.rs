@@ -9,6 +9,7 @@ use crate::compat::ProviderCompat;
 use crate::file_cache::FileCacheConfig;
 use crate::hooks::HooksConfig;
 use crate::logging::LoggingConfig;
+use crate::memory::MemoryConfig;
 use crate::plan::PlanConfig;
 use crate::shell::ShellConfig;
 use crate::subagent::SubAgentConfig;
@@ -104,6 +105,9 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub team: TeamConfig,
+
+    #[serde(default)]
+    pub memory: MemoryConfig,
 
     #[serde(default)]
     pub compact: CompactConfig,
@@ -318,6 +322,7 @@ pub struct Config {
     pub session: SessionConfig,
     pub subagent: SubAgentConfig,
     pub team: TeamConfig,
+    pub memory: MemoryConfig,
     pub compact: CompactConfig,
     /// Provenance of `compact.context_window`, used to decide whether runtime
     /// model changes may safely recompute it.
@@ -515,6 +520,7 @@ impl Config {
             session: merged.session,
             subagent: merged.subagent,
             team: merged.team,
+            memory: merged.memory,
             compact,
             compact_context_window_source,
             plan: merged.plan,
@@ -830,6 +836,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
 
     let subagent = global.subagent.overlay(project.subagent);
     let team = global.team.overlay(project.team);
+    let memory = global.memory.overlay(project.memory);
 
     // Hooks: combine hooks from both configs (project hooks appended after global)
     let hooks = HooksConfig {
@@ -919,6 +926,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         session,
         subagent,
         team,
+        memory,
         compact,
         plan,
         todo,
@@ -1233,6 +1241,22 @@ builtin_agents = true
 enabled = false
 max_members = 8
 inbox_capacity = 64
+
+# Long-term project memory
+[memory]
+enabled = true
+# dir = "path/to/memory-base"
+
+[memory.recall]
+enabled = true
+limit = 5
+timeout_ms = 3000
+# model = "fast-model"
+
+[memory.extract]
+enabled = false                 # opt in: persists durable facts from transcripts
+max_turns = 5
+# model = "fast-model"
 
 # Hook system: run shell commands at tool lifecycle events
 # [[hooks.post_tool_use]]

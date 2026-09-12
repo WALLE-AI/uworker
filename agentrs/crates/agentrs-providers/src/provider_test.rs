@@ -73,7 +73,8 @@ mod tests {
 
         Config {
             subagent: Default::default(),
-            team: Default::default(),
+        team: Default::default(),
+        memory: Default::default(),
             provider_label: provider_label.to_string(),
             provider,
             api_key: api_key.to_string(),
