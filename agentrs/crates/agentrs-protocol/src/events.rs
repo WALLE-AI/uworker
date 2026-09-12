@@ -94,7 +94,35 @@ pub enum ProtocolEvent {
         usage: Usage,
         turns: usize,
     },
+    TeamEvent {
+        event: TeamEvent,
+    },
     Pong,
+}
+
+/// Team lifecycle metadata exposed to protocol hosts.
+///
+/// Message bodies are deliberately excluded. Hosts receive only routing and
+/// lifecycle information needed to render team activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind")]
+#[serde(rename_all = "snake_case")]
+pub enum TeamEvent {
+    MemberJoined {
+        team_name: String,
+        member_name: String,
+        agent_id: String,
+    },
+    MemberExited {
+        team_name: String,
+        member_name: String,
+        agent_id: String,
+    },
+    MessageSent {
+        team_name: String,
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -151,6 +179,8 @@ pub enum ToolCategory {
     Mcp,
     /// Tools that reach the public network (WebFetch, WebSearch).
     Network,
+    /// Tools that manage or communicate with persistent agent teams.
+    Team,
 }
 
 impl std::fmt::Display for ToolCategory {
@@ -161,6 +191,7 @@ impl std::fmt::Display for ToolCategory {
             Self::Exec => write!(f, "exec"),
             Self::Mcp => write!(f, "mcp"),
             Self::Network => write!(f, "network"),
+            Self::Team => write!(f, "team"),
         }
     }
 }

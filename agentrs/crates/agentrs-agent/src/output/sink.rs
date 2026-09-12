@@ -1,4 +1,4 @@
-use agentrs_protocol::events::{SubAgentEventStatus, TodoSnapshot, Usage};
+use agentrs_protocol::events::{SubAgentEventStatus, TeamEvent, TodoSnapshot, Usage};
 
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
@@ -46,4 +46,6 @@ pub trait OutputSink: Send + Sync {
     fn emit_subagent_progress(&self, _id: &str, _status: SubAgentEventStatus, _turns: usize, _usage: Usage) {}
 
     fn emit_subagent_finished(&self, _id: &str, _status: SubAgentEventStatus, _turns: usize, _usage: Usage) {}
+
+    fn emit_team_event(&self, _event: TeamEvent) {}
 }

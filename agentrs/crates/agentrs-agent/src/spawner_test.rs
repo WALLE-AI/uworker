@@ -291,3 +291,210 @@ mod tests_todo_isolation {
         assert!(store.is_none());
     }
 }
+
+#[cfg(test)]
+mod persistent_team_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use agentrs_config::config::{CliArgs, Config};
+    use agentrs_providers::{LlmProvider, ProviderError};
+    use agentrs_types::llm::{LlmEvent, LlmRequest};
+    use agentrs_types::message::{ContentBlock, StopReason, TokenUsage};
+    use agentrs_types::subagent::{SubAgentIsolation, SubAgentSpec, SubAgentStatus};
+    use agentrs_types::team::{AgentId, InboxMessage, Recipient, TeamMessageKind, TeamRuntime};
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use tokio::sync::{Notify, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    use crate::output::null_sink::NullSink;
+    use crate::session::SessionManager;
+    use crate::team::InProcessTeamRuntime;
+    use crate::tool_policy::ToolPolicy;
+
+    use super::AgentSpawner;
+
+    struct RecordingProvider {
+        calls: AtomicUsize,
+        notify: Notify,
+        prompts: Mutex<Vec<String>>,
+        tools: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                notify: Notify::new(),
+                prompts: Mutex::new(Vec::new()),
+                tools: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn wait_for_calls(&self, expected: usize) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while self.calls.load(Ordering::Acquire) < expected {
+                    self.notify.notified().await;
+                }
+            })
+            .await
+            .expect("persistent teammate did not process its inbox");
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            let prompt = request
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.prompts.lock().unwrap().push(prompt);
+            self.tools
+                .lock()
+                .unwrap()
+                .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
+            self.calls.fetch_add(1, Ordering::Release);
+            self.notify.notify_waiters();
+            let (tx, rx) = mpsc::channel(2);
+            tx.try_send(LlmEvent::TextDelta("done".to_string())).unwrap();
+            tx.try_send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    fn config(session_dir: &std::path::Path) -> Config {
+        let mut config = Config::resolve(&CliArgs {
+            provider: Some("anthropic".to_string()),
+            api_key: Some("sk-test".to_string()),
+            base_url: None,
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            max_tokens: Some(1024),
+            thinking: None,
+            thinking_budget: None,
+            max_turns: Some(5),
+            max_tool_call_malformed_turns: None,
+            max_tool_call_failure_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: true,
+            project_dir: None,
+        })
+        .unwrap();
+        config.session.directory = session_dir.to_string_lossy().into_owned();
+        config
+    }
+
+    #[tokio::test]
+    async fn persistent_spawn_receives_follow_up_then_joins_before_team_delete_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(RecordingProvider::new());
+        let spawner = AgentSpawner::new(
+            provider.clone(),
+            config(&temp.path().join("sessions")),
+            temp.path().to_path_buf(),
+            ToolPolicy::Unrestricted,
+        );
+        let sessions = SessionManager::new(temp.path().join("sessions"), 20);
+        let parent = sessions
+            .create(
+                "anthropic",
+                "claude-sonnet-4-20250514",
+                &temp.path().to_string_lossy(),
+                Some("parent"),
+            )
+            .unwrap();
+        *spawner
+            .parent_session_slot()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(parent.id);
+        let team = Arc::new(InProcessTeamRuntime::new(
+            temp.path().join("teams"),
+            8,
+            16,
+            Arc::new(NullSink),
+        ));
+        team.attach_registry(&spawner.registry());
+        let spawner = spawner.with_team_runtime(Arc::clone(&team));
+        team.create_team("core", None, None).await.unwrap();
+
+        let started = spawner
+            .spawn_persistent(
+                SubAgentSpec {
+                    name: "alice".to_string(),
+                    agent_type: None,
+                    prompt: "inspect the parser".to_string(),
+                    max_turns: Some(5),
+                    max_tokens: Some(1024),
+                    system_prompt: None,
+                    depth: 0,
+                    resume: None,
+                    persistent: true,
+                    isolation: SubAgentIsolation::Shared,
+                },
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(started.status, SubAgentStatus::Running);
+        provider.wait_for_calls(1).await;
+
+        let current = team.current_team().unwrap();
+        team.send(
+            Recipient::Named(agentrs_types::team::AgentName::new("alice").unwrap()),
+            InboxMessage {
+                id: "follow-up".to_string(),
+                from: current.lead_agent_id.clone(),
+                message: "check the lexer too".to_string(),
+                summary: "check lexer".to_string(),
+                kind: TeamMessageKind::Text,
+                sent_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        provider.wait_for_calls(2).await;
+
+        {
+            let prompts = provider.prompts.lock().unwrap();
+            assert!(prompts[1].contains("<teammate-message"));
+            assert!(prompts[1].contains("check the lexer too"));
+        }
+        assert!(provider.tools.lock().unwrap()[1].contains(&"SendMessage".to_string()));
+
+        let alice = agentrs_types::team::AgentName::new("alice").unwrap();
+        let alice_runtime = team.for_member(&alice).unwrap();
+        alice_runtime
+            .send(
+                Recipient::Named(agentrs_types::team::AgentName::team_lead()),
+                InboxMessage {
+                    id: "shutdown".to_string(),
+                    from: AgentId::team_lead(&current.id),
+                    message: "approved".to_string(),
+                    summary: "shutdown approved".to_string(),
+                    kind: TeamMessageKind::ShutdownResponse {
+                        request_id: "request-1".to_string(),
+                        approved: true,
+                    },
+                    sent_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        let deleted = team.delete_team().await.unwrap();
+        assert!(deleted.deleted);
+        assert_eq!(deleted.stopped_members, vec![alice]);
+        assert!(spawner.registry().list().is_empty());
+        assert!(!current.team_file_path.exists());
+    }
+}

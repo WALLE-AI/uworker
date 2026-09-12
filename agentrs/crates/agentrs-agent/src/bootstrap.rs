@@ -22,6 +22,7 @@ use agentrs_tools::grep::GrepTool;
 use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
 use agentrs_tools::task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskStore, TaskUpdateTool, task_dir};
+use agentrs_tools::team::{SendMessageTool, TeamCreateTool, TeamDeleteTool};
 use agentrs_tools::todo::{TodoStore, TodoWriteTool};
 use agentrs_tools::tool_search::ToolSearchTool;
 use agentrs_tools::view_image::ViewImageTool;
@@ -43,6 +44,7 @@ use crate::spawn_tool::SpawnTool;
 use crate::spawner::AgentSpawner;
 use crate::subagent::definitions::AgentDefinitions;
 use crate::summarizer::ProviderSummarizer;
+use crate::team::{InProcessTeamRuntime, TeammateInbox};
 use crate::todo_reminder::{PlanSource, TodoRuntime};
 use crate::tool_policy::ToolPolicy;
 
@@ -92,6 +94,12 @@ struct BootstrapEnvironment {
     // Prompt context.
     resolved_shell: ResolvedShell,
     memory_dir: Option<PathBuf>,
+}
+
+struct AgentToolRuntime {
+    registry: Arc<crate::subagent::registry::SubAgentRegistry>,
+    parent_session: Arc<RwLock<Option<String>>>,
+    team_inbox: Option<Arc<TeammateInbox>>,
 }
 
 #[derive(Default)]
@@ -197,7 +205,10 @@ impl AgentBootstrap {
             environment.workspace,
             prompt_usage,
         );
-        engine.set_subagent_runtime(subagent_registry.0, subagent_registry.1);
+        engine.set_subagent_runtime(subagent_registry.registry, subagent_registry.parent_session);
+        if let Some(inbox) = subagent_registry.team_inbox {
+            engine.set_team_inbox(inbox);
+        }
 
         Ok(BootstrapResult {
             engine,
@@ -359,23 +370,34 @@ impl AgentBootstrap {
         provider: &Arc<dyn LlmProvider>,
         workspace: &Path,
         skills: Vec<SkillMetadata>,
-    ) -> (
-        Arc<crate::subagent::registry::SubAgentRegistry>,
-        Arc<RwLock<Option<String>>>,
-    ) {
+    ) -> AgentToolRuntime {
         self.register_web_tools(registry, provider, workspace);
         let parent_tools = registry.shared_tools();
-        let spawner = Arc::new(
-            AgentSpawner::new_with_env(
-                Arc::clone(provider),
-                self.config.clone(),
-                workspace.to_path_buf(),
-                self.runtime_env.clone(),
-                self.tool_policy.clone(),
-            )
-            .with_progress_output(Arc::clone(&self.output))
-            .with_parent_tools(parent_tools),
-        );
+        let mut spawner = AgentSpawner::new_with_env(
+            Arc::clone(provider),
+            self.config.clone(),
+            workspace.to_path_buf(),
+            self.runtime_env.clone(),
+            self.tool_policy.clone(),
+        )
+        .with_progress_output(Arc::clone(&self.output))
+        .with_parent_tools(parent_tools);
+        let team_runtime = (self.config.team.enabled && self.config.subagent.enabled).then(|| {
+            Arc::new(InProcessTeamRuntime::new(
+                PathBuf::from(&self.config.session.directory).join("teams"),
+                self.config.team.max_members,
+                self.config.team.inbox_capacity,
+                Arc::clone(&self.output),
+            ))
+        });
+        if self.config.team.enabled && !self.config.subagent.enabled {
+            tracing::warn!(target: "agentrs_agent", "Team tools require sub-agents and will not be registered");
+        }
+        if let Some(runtime) = &team_runtime {
+            runtime.attach_registry(&spawner.registry());
+            spawner = spawner.with_team_runtime(Arc::clone(runtime));
+        }
+        let spawner = Arc::new(spawner);
         let skill_checker = SkillPermissionChecker::new(
             self.config.tools.skills.deny.clone(),
             self.config.tools.skills.allow.clone(),
@@ -395,7 +417,23 @@ impl AgentBootstrap {
         if self.config.subagent.enabled && self.tool_policy.allows("Spawn") {
             registry.register(Box::new(SpawnTool::new(Arc::clone(&spawner))));
         }
-        (spawner.registry(), spawner.parent_session_slot())
+        if let Some(runtime) = &team_runtime {
+            let shared: Arc<dyn agentrs_types::team::TeamRuntime> = runtime.clone();
+            if self.tool_policy.allows("TeamCreate") {
+                registry.register(Box::new(TeamCreateTool::new(Arc::clone(&shared))));
+            }
+            if self.tool_policy.allows("TeamDelete") {
+                registry.register(Box::new(TeamDeleteTool::new(Arc::clone(&shared))));
+            }
+            if self.tool_policy.allows("SendMessage") {
+                registry.register(Box::new(SendMessageTool::new(shared)));
+            }
+        }
+        AgentToolRuntime {
+            registry: spawner.registry(),
+            parent_session: spawner.parent_session_slot(),
+            team_inbox: team_runtime.map(|runtime| runtime.leader_inbox()),
+        }
     }
 
     /// Register the network tools, when configured.

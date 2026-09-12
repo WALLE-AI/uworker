@@ -11,6 +11,7 @@ pub mod plan;
 pub mod schema;
 pub mod shell;
 pub mod subagent;
+pub mod team;
 pub mod todo;
 pub mod tui;
 pub mod web;

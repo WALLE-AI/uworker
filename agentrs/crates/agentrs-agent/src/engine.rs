@@ -25,6 +25,7 @@ use crate::plan::state::PlanState;
 use crate::session::{Session, SessionManager};
 use crate::stream::StreamOutcome;
 use crate::subagent::registry::SubAgentRegistry;
+use crate::team::{TeammateInbox, render_teammate_messages};
 use crate::todo_reminder::TodoRuntime;
 use crate::tool_call::{
     DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, ToolCallFailureFingerprint,
@@ -131,6 +132,8 @@ pub struct AgentEngine {
     /// Process-wide lifecycle registry shared with Spawn tools and descendants.
     subagent_registry: Option<Arc<SubAgentRegistry>>,
     subagent_parent_id: Option<Arc<RwLock<Option<String>>>>,
+    /// Actor-bound Team inbox drained only at valid conversation boundaries.
+    team_inbox: Option<Arc<TeammateInbox>>,
 
     // Session persistence.
     /// Optional session manager used when persistence is enabled.
@@ -254,6 +257,7 @@ impl AgentEngine {
             turn_cancel: CancellationToken::new(),
             subagent_registry: None,
             subagent_parent_id: None,
+            team_inbox: None,
             session_manager,
             current_session: None,
             output,
@@ -363,6 +367,7 @@ impl AgentEngine {
             turn_cancel: CancellationToken::new(),
             subagent_registry: None,
             subagent_parent_id: None,
+            team_inbox: None,
             session_manager,
             current_session: Some(session),
             output,
@@ -563,7 +568,11 @@ impl AgentEngine {
         self.messages.push(message);
     }
 
-    async fn run_inner(&mut self, content_blocks: Vec<ContentBlock>, msg_id: &str) -> Result<AgentResult, AgentError> {
+    async fn run_inner(
+        &mut self,
+        mut content_blocks: Vec<ContentBlock>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
         self.reset_turn_cancel();
         if let Some(todo) = &self.todo {
             todo.on_user_turn_start();
@@ -576,6 +585,8 @@ impl AgentEngine {
                 .unwrap_or_else(|| Uuid::now_v7().to_string()),
         );
         self.output.emit_stream_start(msg_id);
+
+        self.append_team_messages_to(&mut content_blocks);
 
         let user_tokens = estimate_content_tokens(&content_blocks);
         self.push_history(Role::User, content_blocks);
@@ -707,6 +718,7 @@ impl AgentEngine {
             if !follow_up_blocks.is_empty() {
                 self.push_history(Role::User, follow_up_blocks);
             }
+            self.push_pending_team_messages();
 
             // Save session after each tool round.
             self.save_session();
@@ -1720,6 +1732,35 @@ impl AgentEngine {
         self.subagent_parent_id = Some(parent_id);
     }
 
+    pub(crate) fn set_team_inbox(&mut self, inbox: Arc<TeammateInbox>) {
+        self.team_inbox = Some(inbox);
+    }
+
+    fn append_team_messages_to(&self, blocks: &mut Vec<ContentBlock>) {
+        let Some(inbox) = &self.team_inbox else {
+            return;
+        };
+        let messages = inbox.drain();
+        if !messages.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: render_teammate_messages(&messages),
+            });
+        }
+    }
+
+    fn push_pending_team_messages(&mut self) {
+        let Some(inbox) = &self.team_inbox else {
+            return;
+        };
+        let messages = inbox.drain();
+        if messages.is_empty() {
+            return;
+        }
+        let text = render_teammate_messages(&messages);
+        self.record_local_context_addition(estimate_text_tokens(&text));
+        self.push_history(Role::User, vec![ContentBlock::Text { text }]);
+    }
+
     fn record_subagent_usage(&mut self, usage: &TokenUsage) {
         self.total_usage.input_tokens += usage.input_tokens;
         self.total_usage.output_tokens += usage.output_tokens;
@@ -1804,6 +1845,9 @@ impl AgentEngine {
 
     /// Run stop hooks when the agent session ends
     pub async fn run_stop_hooks(&self) {
+        if let Some(registry) = &self.subagent_registry {
+            registry.cancel_all().await;
+        }
         if let Some(hook_engine) = &self.hooks {
             let messages = hook_engine.run_stop().await;
             for msg in messages {

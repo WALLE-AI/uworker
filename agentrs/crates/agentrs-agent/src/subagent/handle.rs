@@ -2,11 +2,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use agentrs_types::subagent::{SubAgentId, SubAgentResult, SubAgentStatus};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::inbox::InboxMessage;
 use super::registry::SubAgentSnapshot;
 
 pub(crate) struct SubAgentHandle {
@@ -15,8 +14,7 @@ pub(crate) struct SubAgentHandle {
     pub(crate) status: Arc<RwLock<SubAgentStatus>>,
     pub(crate) cancel: CancellationToken,
     pub(crate) join: Mutex<Option<JoinHandle<SubAgentResult>>>,
-    #[allow(dead_code)] // Reserved for persistent Team members.
-    pub(crate) inbox: Option<mpsc::Sender<InboxMessage>>,
+    pub(crate) persistent: bool,
     pub(crate) started_at: Instant,
 }
 
@@ -34,9 +32,21 @@ impl SubAgentHandle {
             status,
             cancel,
             join: Mutex::new(Some(join)),
-            inbox: None,
+            persistent: false,
             started_at: Instant::now(),
         }
+    }
+
+    pub(crate) fn new_persistent(
+        id: SubAgentId,
+        name: String,
+        status: Arc<RwLock<SubAgentStatus>>,
+        cancel: CancellationToken,
+        join: JoinHandle<SubAgentResult>,
+    ) -> Self {
+        let mut handle = Self::new(id, name, status, cancel, join);
+        handle.persistent = true;
+        handle
     }
 
     pub(crate) fn snapshot(&self) -> SubAgentSnapshot {

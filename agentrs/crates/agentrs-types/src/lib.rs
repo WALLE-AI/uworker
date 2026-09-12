@@ -9,4 +9,5 @@ pub mod skill_types;
 pub mod spawner;
 pub mod subagent;
 pub mod summarizer;
+pub mod team;
 pub mod tool;

@@ -177,6 +177,12 @@ enabled = true
 directory = ".agentrs/sessions"
 max_sessions = 20
 
+# Persistent named sub-agents. Requires [subagent].enabled = true.
+[team]
+enabled = false
+max_members = 8
+inbox_capacity = 64
+
 [compact]
 compaction = "safe"   # off | safe | full
 toon = false          # Enable TOON encoding for JSON arrays

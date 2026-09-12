@@ -117,8 +117,8 @@ Agent wants to invoke a tool and needs client approval. Agent PAUSES execution u
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | string | Unique ID for this tool invocation |
-| `tool.name` | string | Tool name: `Read`, `Write`, `Edit`, `ExecCommand`, `Glob`, `Grep`, `Spawn`, or MCP tool name |
-| `tool.category` | string | `"info"` (read-only), `"edit"` (file mutation), `"exec"` (shell), `"network"` (outbound HTTP), `"mcp"` (MCP tool) |
+| `tool.name` | string | Tool name: `Read`, `Write`, `Edit`, `ExecCommand`, `Glob`, `Grep`, `Spawn`, Team tools, or MCP tool name |
+| `tool.category` | string | `"info"` (read-only), `"edit"` (file mutation), `"exec"` (shell), `"network"` (outbound HTTP), `"team"` (agent coordination), `"mcp"` (MCP tool) |
 | `tool.args` | object | Tool arguments |
 | `tool.description` | string | Human-readable one-line description |
 
@@ -133,6 +133,7 @@ Agent wants to invoke a tool and needs client approval. Agent PAUSES execution u
 | `Edit` | `edit` | Modifies file content |
 | `ExecCommand` | `exec` | Executes shell commands |
 | `Spawn` | `exec` | Spawns sub-agent |
+| `TeamCreate`, `TeamDelete`, `SendMessage` | `team` | Coordinates an in-process agent team |
 | MCP tools | `mcp` | External MCP server tools |
 
 > **Note**: When `auto_approve = true` (yolo mode) or when a tool is in the `allow_list`, the agent executes immediately and emits `tool_running` directly, skipping `tool_request`.
@@ -319,7 +320,31 @@ The event carries the **whole list**, matching the `TodoWrite` tool's replace-on
 
 Only emitted when the checklist actually changed, so an unchanged list will not re-send on every turn, and a session that never uses the tool emits nothing.
 
-### 1.15 `pong`
+### 1.15 Sub-agent lifecycle
+
+`sub_agent_started`, `sub_agent_progress`, and `sub_agent_finished` expose an
+addressable child's id, status, turns, and aggregate usage. Prompt and result
+content are deliberately excluded.
+
+### 1.16 `team_event`
+
+```json
+{
+  "type": "team_event",
+  "event": {
+    "kind": "message_sent",
+    "team_name": "core",
+    "from": "alice@core",
+    "to": "team-lead"
+  }
+}
+```
+
+The nested `kind` is `member_joined`, `member_exited`, or `message_sent`.
+Events contain lifecycle and routing metadata only; message bodies are never
+written to the protocol event stream.
+
+### 1.17 `pong`
 
 Response to a `ping` command from the client. Used for heartbeat/liveness detection.
 

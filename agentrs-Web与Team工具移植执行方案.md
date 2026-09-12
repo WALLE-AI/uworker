@@ -6,9 +6,8 @@
 > 适用仓库：`agentrs`（Rust 2021，Cargo workspace）
 > 约束基准：`agentrs/AGENTS.md`
 
-> **排期状态（2026-09-02 更新）**：本期仅实施 Web 线，**Team 三件套暂不实现**。
-> 落地方案请以 `agentrs-Web工具移植执行方案.md`（Web 子集，8~10 人日）为准；
-> 本文档保留作为 Team 线的设计与用例存档，待 Web 线交付后另行排期。
+> **实施状态（2026-09-12 更新）**：Web 与 Team 两条实现线均已落地。Team 线复用 Task 级 SubAgent 注册表，支持持久具名 teammate、边界收件箱注入、结构化退出和会话结束清理。
+> Team 功能默认关闭，通过 `[team] enabled = true` 显式启用；持久 teammate 当前仅支持共享工作区隔离。
 
 ---
 
@@ -526,8 +525,8 @@ agentrs-tools/src/team/send_tool.rs     // SendMessage
 - [ ] `WebFetch` 可抓取公网 HTTPS 页面并返回 Markdown；跨 host 重定向返回引导文本；二进制内容落盘并在结果中标注（TC-1.5-01/04/11）
 - [ ] `WebFetch` 拒绝 `http://127.0.0.1`、`http://169.254.169.254`、`http://localhost`、IPv6 环回及各私网段（TC-1.1-07~26）
 - [ ] `WebSearch` 在配置 Brave / Tavily / SearXNG 任一后端时返回结果，格式含结尾 REMINDER；后端为 `none` 时该工具不出现在 tool list 中（TC-2.1-08、TC-2.3-01/05）
-- [ ] `TeamCreate` → `SendMessage` → teammate 在下一工具轮次收到 `<teammate-message>` → `TeamDelete` 全链路可跑通（TC-3.5-01）
-- [ ] `TeamDelete` 在存在活跃成员时拒绝并列出成员名（TC-3.4-06）
+- [x] `TeamCreate` → `SendMessage` → teammate 在下一工具轮次收到 `<teammate-message>` → `TeamDelete` 全链路可跑通（TC-3.5-01）
+- [x] `TeamDelete` 在存在活跃成员时拒绝并列出成员名（TC-3.4-06）
 - [ ] §8 全部用例通过，覆盖率达 §8.6 门槛（`url_policy.rs` 分支覆盖 100%）
 
 **工程**

@@ -90,7 +90,9 @@ impl SubAgentRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
         {
-            handle.cancel.cancel();
+            if !handle.persistent {
+                handle.cancel.cancel();
+            }
         }
     }
 

@@ -21,6 +21,7 @@ mod stream;
 mod subagent;
 pub mod summarizer;
 mod task_tools;
+mod team;
 mod todo_reminder;
 mod tool_call;
 pub mod tool_policy;

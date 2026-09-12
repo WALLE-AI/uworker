@@ -167,4 +167,8 @@ impl OutputSink for ProtocolSink {
             usage,
         });
     }
+
+    fn emit_team_event(&self, event: agentrs_protocol::events::TeamEvent) {
+        let _ = self.writer.emit(&ProtocolEvent::TeamEvent { event });
+    }
 }

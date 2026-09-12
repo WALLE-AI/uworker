@@ -1822,6 +1822,25 @@ context_window = 200000
         assert_eq!(merged.web.deny_domains, vec!["blocked.com".to_string()]);
     }
 
+    #[test]
+    fn test_merge_team_uses_field_level_project_overrides() {
+        let global = ConfigFile {
+            team: toml::from_str("enabled = true\nmax_members = 3\ninbox_capacity = 12")
+                .expect("parse global team config"),
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            team: toml::from_str("enabled = false\nmax_members = 8").expect("parse project team config"),
+            ..Default::default()
+        };
+
+        let merged = merge_config_files(global, project);
+
+        assert!(!merged.team.enabled, "an explicit project false must win");
+        assert_eq!(merged.team.max_members, 8, "explicit defaults must still win");
+        assert_eq!(merged.team.inbox_capacity, 12, "absent fields inherit globally");
+    }
+
     // --- The generated config template must round-trip through our own parser ---
 
     #[test]
@@ -1831,6 +1850,9 @@ context_window = 200000
 
         // Uncommented sections carry real values.
         assert!(parsed.web.enabled, "[web] is active in the template");
+        assert!(!parsed.team.enabled, "teams remain opt-in in the template");
+        assert_eq!(parsed.team.max_members, 8);
+        assert_eq!(parsed.team.inbox_capacity, 64);
         assert_eq!(
             parsed.web.search.backend,
             crate::web::SearchBackendKind::None,

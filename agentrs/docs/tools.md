@@ -16,6 +16,9 @@ The agent includes a core local tool suite and agent-level helpers. The LLM auto
 | **WebFetch** | Fetch a URL, convert it to Markdown, and answer a prompt about it | Yes |
 | **WebSearch** | Search the web through a configured provider | Yes |
 | **Spawn** | Spawn sub-agents for parallel tasks | No |
+| **TeamCreate** | Create an in-process team for persistent sub-agents | No |
+| **TeamDelete** | Delete a team after its members shut down | No |
+| **SendMessage** | Send or broadcast a message within the active team | No |
 | **ToolSearch** | Load schemas for deferred tools | Yes |
 
 ---
@@ -199,6 +202,27 @@ across Anthropic, OpenAI, Bedrock, and Vertex.
 
 See [Sub-Agent Spawning](advanced.md#sub-agent-spawning) in the Advanced Features guide.
 
+Set `persistent: true` on a Spawn task after calling **TeamCreate** to make the
+named child an addressable teammate. Persistent tasks use shared isolation and
+return immediately while the member processes its initial prompt.
+
+## TeamCreate / TeamDelete / SendMessage
+
+These tools implement opt-in, in-process agent teams:
+
+- **TeamCreate** creates one active team and its `team-lead@<team>` identity.
+  Conflicting on-disk names receive a numeric suffix.
+- **SendMessage** sends to a member name or broadcasts with `to: "*"`. The
+  sender is bound by the runtime and cannot be supplied by the model. Messages
+  are injected at a conversation boundary as `<teammate-message>` blocks.
+- **TeamDelete** is idempotent, but refuses to remove a team while a non-lead
+  member is active. Send `type: "shutdown_request"`; the teammate can answer
+  with `type: "shutdown_response"`, the same `request_id`, and `approve: true`.
+
+Team state is mirrored under `<session.directory>/teams/<team>/`, including
+per-recipient inbox JSON for inspection. Runtime delivery remains in memory,
+so a full process restart does not recreate teammate tasks automatically.
+
 ## ToolSearch
 
 Load full schemas for deferred tools so the LLM can invoke them. Deferred bundled or MCP tools are registered without their full parameter schemas until the LLM calls ToolSearch.
@@ -222,7 +246,7 @@ User input → Build request (system prompt + history + tool definitions)
 ```
 
 - Concurrent-safe tools (Read, Grep, Glob, ViewImage, WebFetch, WebSearch) execute in parallel
-- Non-concurrent tools (Write, Edit, ExecCommand) execute sequentially
+- Non-concurrent tools (Write, Edit, ExecCommand, TeamCreate, TeamDelete, SendMessage) execute sequentially
 - Tool output is auto-truncated to prevent context window overflow
 - Network tools observe a per-turn cancellation token, so an interrupted turn does not wait out a request timeout
 - Tool output can be compacted (see [Output Compaction](advanced.md#output-compaction))

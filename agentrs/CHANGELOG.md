@@ -8,10 +8,13 @@
 * **agent:** add reusable agent definitions, built-in explore/plan agents, structured progress events, and hidden summarizer configuration
 * **agent:** add optional Git worktree isolation and recursive child-session lifecycle management
 * **tools:** support shared tool instances with per-engine tool contexts and read-only command enforcement
+* **agent:** add persistent named teams with bounded mailboxes, structured shutdown, and lifecycle events
+* **tools:** add TeamCreate, TeamDelete, and SendMessage coordination tools
 
 ### Documentation
 
 * document sub-agent configuration, definitions, resume behavior, and worktree isolation
+* document Team configuration, persistent Spawn tasks, messaging, and shutdown behavior
 
 ## [0.2.11](https://github.com/iOfficeAI/agentrs/compare/v0.2.10...v0.2.11) (2026-08-13)
 

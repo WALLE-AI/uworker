@@ -8,6 +8,7 @@ pub mod grep;
 pub mod read;
 pub mod registry;
 pub mod task;
+pub mod team;
 pub mod todo;
 mod tool;
 pub mod tool_search;

@@ -380,6 +380,39 @@ Set `isolation` to `worktree` for a detached Git worktree. A clean worktree is r
 
 ---
 
+## Agent Teams
+
+Team mode builds on persistent sub-agents. It is disabled by default:
+
+```toml
+[team]
+enabled = true
+max_members = 8
+inbox_capacity = 64
+```
+
+The leader first calls `TeamCreate`, then calls `Spawn` with
+`persistent: true` for each named teammate. Persistent spawn returns without
+waiting for the member to finish. Each member keeps its own persisted
+conversation, releases the shared concurrency permit while idle, and receives
+messages through its actor-bound `SendMessage` tool.
+
+Messages are queued rather than interrupting an in-flight tool. The engine
+drains them after complete tool results and before the next provider turn, so
+provider `tool_use` / `tool_result` framing remains valid. A bounded full inbox
+returns an explicit error rather than silently dropping content. Broadcasts
+exclude the sender and consume work proportional to team size.
+
+Use the structured `shutdown_request` and `shutdown_response` message types to
+stop members. `TeamDelete` refuses active members, joins stopped member tasks,
+and then removes the team mirror. Dropping the session cancels remaining
+members and performs best-effort storage cleanup.
+
+Persistent team members currently require `isolation = "shared"`; ordinary
+one-shot sub-agents retain worktree isolation support.
+
+---
+
 ## Context Compression
 
 A cache-friendly context strategy that bounds each tool result once when it enters history, then uses token-based compaction to prevent context window overflow during long conversations.

@@ -133,6 +133,7 @@ mod tests {
         assert_eq!(ToolCategory::Exec.to_string(), "exec");
         assert_eq!(ToolCategory::Mcp.to_string(), "mcp");
         assert_eq!(ToolCategory::Network.to_string(), "network");
+        assert_eq!(ToolCategory::Team.to_string(), "team");
     }
 
     #[test]
@@ -143,6 +144,7 @@ mod tests {
             (ToolCategory::Exec, "exec"),
             (ToolCategory::Mcp, "mcp"),
             (ToolCategory::Network, "network"),
+            (ToolCategory::Team, "team"),
         ] {
             let json = serde_json::to_value(category).unwrap();
             assert_eq!(json, serde_json::Value::String(expected.to_string()));
@@ -304,5 +306,44 @@ mod tests {
             assert!(event.get("prompt").is_none());
             assert!(event.get("result").is_none());
         }
+    }
+
+    #[test]
+    fn team_lifecycle_events_have_stable_non_sensitive_shapes() {
+        let joined = serde_json::to_value(ProtocolEvent::TeamEvent {
+            event: TeamEvent::MemberJoined {
+                team_name: "backend".into(),
+                member_name: "alice".into(),
+                agent_id: "alice@backend".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(joined["type"], "team_event");
+        assert_eq!(joined["event"]["kind"], "member_joined");
+        assert_eq!(joined["event"]["agent_id"], "alice@backend");
+
+        let exited = serde_json::to_value(ProtocolEvent::TeamEvent {
+            event: TeamEvent::MemberExited {
+                team_name: "backend".into(),
+                member_name: "alice".into(),
+                agent_id: "alice@backend".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(exited["event"]["kind"], "member_exited");
+
+        let sent = serde_json::to_value(ProtocolEvent::TeamEvent {
+            event: TeamEvent::MessageSent {
+                team_name: "backend".into(),
+                from: "team-lead".into(),
+                to: "alice".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(sent["event"]["kind"], "message_sent");
+        assert_eq!(sent["event"]["from"], "team-lead");
+        assert_eq!(sent["event"]["to"], "alice");
+        assert!(sent["event"].get("message").is_none());
+        assert!(sent["event"].get("content").is_none());
     }
 }

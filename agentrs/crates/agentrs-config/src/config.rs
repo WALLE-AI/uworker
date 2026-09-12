@@ -12,6 +12,7 @@ use crate::logging::LoggingConfig;
 use crate::plan::PlanConfig;
 use crate::shell::ShellConfig;
 use crate::subagent::SubAgentConfig;
+use crate::team::TeamConfig;
 use crate::todo::TodoConfig;
 use crate::tui::TuiConfig;
 use crate::web::WebConfig;
@@ -100,6 +101,9 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub subagent: SubAgentConfig,
+
+    #[serde(default)]
+    pub team: TeamConfig,
 
     #[serde(default)]
     pub compact: CompactConfig,
@@ -313,6 +317,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub session: SessionConfig,
     pub subagent: SubAgentConfig,
+    pub team: TeamConfig,
     pub compact: CompactConfig,
     /// Provenance of `compact.context_window`, used to decide whether runtime
     /// model changes may safely recompute it.
@@ -509,6 +514,7 @@ impl Config {
             tools,
             session: merged.session,
             subagent: merged.subagent,
+            team: merged.team,
             compact,
             compact_context_window_source,
             plan: merged.plan,
@@ -823,6 +829,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     };
 
     let subagent = global.subagent.overlay(project.subagent);
+    let team = global.team.overlay(project.team);
 
     // Hooks: combine hooks from both configs (project hooks appended after global)
     let hooks = HooksConfig {
@@ -911,6 +918,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         tools,
         session,
         subagent,
+        team,
         compact,
         plan,
         todo,
@@ -1219,6 +1227,12 @@ depth = 1
 cancel_grace = 5000              # milliseconds
 persist_sessions = true
 builtin_agents = true
+
+# Persistent in-process agent teams (opt in)
+[team]
+enabled = false
+max_members = 8
+inbox_capacity = 64
 
 # Hook system: run shell commands at tool lifecycle events
 # [[hooks.post_tool_use]]

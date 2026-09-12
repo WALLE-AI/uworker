@@ -36,6 +36,7 @@ fn minimal_config() -> Config {
         tui: agentrs_config::tui::TuiConfig::default(),
         web: agentrs_config::web::WebConfig::default(),
         subagent: Default::default(),
+        team: Default::default(),
     }
 }
 
@@ -76,6 +77,32 @@ async fn bootstrap_registers_all_expected_tools() {
         names.iter().any(|n| n == "ToolSearch"),
         "ToolSearchTool should be registered"
     );
+}
+
+#[tokio::test]
+async fn team_tools_are_registered_only_when_team_mode_is_enabled() {
+    let workspace = tempfile::tempdir().unwrap();
+    let disabled = AgentBootstrap::new(minimal_config(), workspace.path().to_string_lossy(), null_output())
+        .build()
+        .await
+        .unwrap();
+    for name in ["TeamCreate", "TeamDelete", "SendMessage"] {
+        assert!(!disabled.engine.tool_names().contains(&name.to_string()));
+    }
+
+    let mut config = minimal_config();
+    config.team.enabled = true;
+    config.session.directory = workspace.path().join("sessions").to_string_lossy().into_owned();
+    let enabled = AgentBootstrap::new(config, workspace.path().to_string_lossy(), null_output())
+        .build()
+        .await
+        .unwrap();
+    for name in ["TeamCreate", "TeamDelete", "SendMessage"] {
+        assert!(
+            enabled.engine.tool_names().contains(&name.to_string()),
+            "missing {name}"
+        );
+    }
 }
 
 #[tokio::test]

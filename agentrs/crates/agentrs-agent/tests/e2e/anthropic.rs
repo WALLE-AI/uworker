@@ -55,6 +55,7 @@ fn anthropic_config(api_key: &str) -> Config {
         tui: agentrs_config::tui::TuiConfig::default(),
         web: agentrs_config::web::WebConfig::default(),
         subagent: Default::default(),
+        team: Default::default(),
     }
 }
 

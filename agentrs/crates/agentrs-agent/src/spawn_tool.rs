@@ -51,7 +51,14 @@ impl SpawnTool {
             };
         }
 
-        let results = self.spawner.spawn_parallel(tasks, cancel).await;
+        let (persistent, transient): (Vec<_>, Vec<_>) = tasks.into_iter().partition(|task| task.persistent);
+        let mut results = futures::future::join_all(
+            persistent
+                .into_iter()
+                .map(|task| self.spawner.spawn_persistent(task, cancel.child_token())),
+        )
+        .await;
+        results.extend(self.spawner.spawn_parallel(transient, cancel).await);
         let output = results.iter().map(render_result).collect::<Vec<_>>().join("\n");
         ToolResult {
             content: output,
@@ -73,7 +80,8 @@ impl Tool for SpawnTool {
          - Each sub-agent runs up to 200 model turns with a 4096 token output limit.\n\
          - Use for independent, parallelizable tasks (e.g., searching different modules, \
          running separate analyses).\n\
-         - Do NOT use for tasks that need shared state or sequential coordination."
+         - Set persistent=true after TeamCreate to start an addressable teammate that can receive SendMessage calls.\n\
+         - Do NOT use ordinary one-shot tasks for work that needs sequential coordination."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -106,6 +114,10 @@ impl Tool for SpawnTool {
                                 "type": "string",
                                 "enum": ["shared", "worktree"],
                                 "description": "Run in the shared workspace or an isolated Git worktree"
+                            },
+                            "persistent": {
+                                "type": "boolean",
+                                "description": "Keep this named sub-agent available as a Team member after its initial task"
                             }
                         },
                         "required": ["name", "prompt"]
@@ -175,7 +187,12 @@ fn parse_tasks(input: &Value, depth: usize) -> Result<Vec<SubAgentSpec>, String>
             system_prompt: None,
             depth,
             resume: task.get("task_id").and_then(Value::as_str).map(SubAgentId::new),
-            persistent: false,
+            persistent: match task.get("persistent") {
+                None => false,
+                Some(value) => value
+                    .as_bool()
+                    .ok_or("Each task's 'persistent' field must be a boolean")?,
+            },
             isolation: match task.get("isolation").and_then(Value::as_str) {
                 None | Some("shared") => SubAgentIsolation::Shared,
                 Some("worktree") => SubAgentIsolation::Worktree,
@@ -189,9 +206,12 @@ fn parse_tasks(input: &Value, depth: usize) -> Result<Vec<SubAgentSpec>, String>
 
 fn render_result(result: &crate::spawner::SubAgentResult) -> String {
     let status = match result.status {
-        SubAgentStatus::Finished | SubAgentStatus::Idle => "completed",
+        SubAgentStatus::Finished => "completed",
+        SubAgentStatus::Running => "running",
+        SubAgentStatus::Idle => "idle",
         SubAgentStatus::Cancelled => "cancelled",
-        SubAgentStatus::Pending | SubAgentStatus::Running | SubAgentStatus::Failed => "error",
+        SubAgentStatus::Pending => "pending",
+        SubAgentStatus::Failed => "error",
     };
     let text = agentrs_tools::truncate_utf8(&result.text, 100_000);
     let summary = text.lines().next().unwrap_or_default();

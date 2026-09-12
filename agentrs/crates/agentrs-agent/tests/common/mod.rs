@@ -272,6 +272,7 @@ pub fn test_config() -> Config {
         tui: agentrs_config::tui::TuiConfig::default(),
         web: agentrs_config::web::WebConfig::default(),
         subagent: Default::default(),
+        team: Default::default(),
     }
 }
 

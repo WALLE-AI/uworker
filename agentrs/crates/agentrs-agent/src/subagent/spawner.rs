@@ -15,6 +15,7 @@ use agentrs_tools::grep::GrepTool;
 use agentrs_tools::read::ReadTool;
 use agentrs_tools::registry::ToolRegistry;
 use agentrs_tools::task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskStore, TaskUpdateTool, task_dir};
+use agentrs_tools::team::SendMessageTool;
 use agentrs_tools::todo::{TodoStore, TodoWriteTool};
 use agentrs_tools::tool_search::ToolSearchTool;
 use agentrs_tools::write::WriteTool;
@@ -22,10 +23,11 @@ use agentrs_types::message::TokenUsage;
 use agentrs_types::subagent::{
     ForkOverrides, Spawner, SubAgentId, SubAgentIsolation, SubAgentResult, SubAgentSpec, SubAgentStatus,
 };
+use agentrs_types::team::{AgentName, TeamRuntime};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::context::{append_subagent_role, build_child_prompt};
+use super::context::{SubAgentIdentity, append_subagent_role, build_child_prompt};
 use super::definitions::AgentDefinitions;
 use super::handle::SubAgentHandle;
 use super::output::SubAgentSink;
@@ -35,6 +37,7 @@ use crate::engine::{AgentEngine, AgentResult};
 use crate::error::AgentError;
 use crate::output::OutputSink;
 use crate::output::null_sink::NullSink;
+use crate::team::{InProcessTeamRuntime, TeammateInbox, render_teammate_messages};
 use crate::todo_reminder::{PlanSource, TodoRuntime};
 use crate::tool_policy::ToolPolicy;
 
@@ -50,6 +53,7 @@ pub struct AgentSpawner {
     parent_session_id: Arc<RwLock<Option<String>>>,
     parent_tools: Vec<Arc<dyn Tool>>,
     definitions: Arc<AgentDefinitions>,
+    team_runtime: Option<Arc<InProcessTeamRuntime>>,
 }
 
 impl AgentSpawner {
@@ -81,6 +85,7 @@ impl AgentSpawner {
             parent_session_id: Arc::new(RwLock::new(None)),
             parent_tools: Vec::new(),
             definitions,
+            team_runtime: None,
         }
     }
 
@@ -91,6 +96,11 @@ impl AgentSpawner {
 
     pub(crate) fn with_parent_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
         self.parent_tools = tools;
+        self
+    }
+
+    pub(crate) fn with_team_runtime(mut self, runtime: Arc<InProcessTeamRuntime>) -> Self {
+        self.team_runtime = Some(runtime);
         self
     }
 
@@ -106,6 +116,115 @@ impl AgentSpawner {
                 .map(|spec| self.spawn(spec, ForkOverrides::default(), cancel.child_token())),
         )
         .await
+    }
+
+    pub(crate) async fn spawn_persistent(&self, spec: SubAgentSpec, cancel: CancellationToken) -> SubAgentResult {
+        if spec.resume.is_some() {
+            return failed_result(
+                spec,
+                "A persistent team member cannot resume an unrelated task id".to_string(),
+            );
+        }
+        if spec.isolation == SubAgentIsolation::Worktree {
+            return failed_result(
+                spec,
+                "Persistent team members currently require shared isolation".to_string(),
+            );
+        }
+        if spec.depth >= self.base_config.subagent.depth {
+            return failed_result(
+                spec,
+                format!(
+                    "Sub-agent depth exceeds subagent.depth={}",
+                    self.base_config.subagent.depth
+                ),
+            );
+        }
+        let Some(team_runtime) = self.team_runtime.clone() else {
+            return failed_result(
+                spec,
+                "Team mode is disabled; enable [team] before spawning a persistent member".to_string(),
+            );
+        };
+        let id = SubAgentId::new(uuid::Uuid::now_v7().to_string());
+        let status = Arc::new(RwLock::new(SubAgentStatus::Pending));
+        let task_status = Arc::clone(&status);
+        let task_cancel = cancel.child_token();
+        let handle_cancel = task_cancel.clone();
+        let task_name = spec.name.clone();
+        let (member_name, _, inbox) = match team_runtime.register_member(
+            &spec.name,
+            spec.agent_type.clone(),
+            id.clone(),
+            handle_cancel.clone(),
+        ) {
+            Ok(member) => member,
+            Err(error) => return failed_result_with_id(id, spec.name, error.to_string()),
+        };
+        let permits = self.registry.permits();
+        let spawner = self.clone();
+        let task_id = id.clone();
+        let result_name = task_name.clone();
+        let join = tokio::spawn(async move {
+            let _member_exit = MemberExitGuard {
+                runtime: team_runtime,
+                name: member_name,
+            };
+            let mut next = spec;
+            let mut usage = TokenUsage::default();
+            let mut turns = 0;
+            let final_result = loop {
+                let permit = tokio::select! {
+                    permit = permits.clone().acquire_owned() => permit.ok(),
+                    _ = task_cancel.cancelled() => None,
+                };
+                let Some(permit) = permit else {
+                    break cancelled_result(task_id.clone(), result_name.clone());
+                };
+                set_status(&task_status, SubAgentStatus::Running);
+                let result = spawner
+                    .run_child(
+                        task_id.clone(),
+                        next.clone(),
+                        ForkOverrides::default(),
+                        task_cancel.clone(),
+                    )
+                    .await;
+                drop(permit);
+                add_usage(&mut usage, &result.usage);
+                turns += result.turns;
+                if result.status.is_error() {
+                    break SubAgentResult { usage, turns, ..result };
+                }
+                set_status(&task_status, SubAgentStatus::Idle);
+                let messages = tokio::select! {
+                    _ = task_cancel.cancelled() => Vec::new(),
+                    messages = inbox.wait() => messages,
+                };
+                if messages.is_empty() {
+                    break cancelled_result(task_id.clone(), result_name.clone());
+                }
+                next.prompt = render_teammate_messages(&messages);
+                next.resume = Some(task_id.clone());
+            };
+            set_status(&task_status, final_result.status);
+            final_result
+        });
+        self.registry.register(SubAgentHandle::new_persistent(
+            id.clone(),
+            task_name.clone(),
+            status,
+            handle_cancel,
+            join,
+        ));
+        SubAgentResult {
+            id,
+            name: task_name,
+            text: "Persistent team member started and is processing its initial task".to_string(),
+            usage: TokenUsage::default(),
+            turns: 0,
+            status: SubAgentStatus::Running,
+        }
     }
 
     pub(crate) fn registry(&self) -> Arc<SubAgentRegistry> {
@@ -145,6 +264,14 @@ impl AgentSpawner {
             .as_ref()
             .map(|worktree| worktree.path().to_path_buf())
             .unwrap_or_else(|| self.cwd.clone());
+        let team_context = if spec.persistent {
+            match persistent_context(self.team_runtime.as_deref(), &spec.name) {
+                Ok(context) => Some(context),
+                Err(error) => return failed_result_with_id(id, spec.name, error),
+            }
+        } else {
+            None
+        };
         let mut config = self.base_config.clone();
         let Some(definition) = self.definitions.resolve(spec.agent_type.as_deref()).cloned() else {
             return failed_result_with_id(
@@ -182,10 +309,16 @@ impl AgentSpawner {
         );
         config.system_prompt = match spec.system_prompt.clone().or(definition.system_prompt.clone()) {
             Some(mut prompt) => {
-                append_subagent_role(&mut prompt, None);
+                append_subagent_role(&mut prompt, team_context.as_ref().map(|context| &context.identity));
                 Some(prompt)
             }
-            None => match build_child_prompt(&child_policy, &config, &child_cwd, None, definition.omit_project_rules) {
+            None => match build_child_prompt(
+                &child_policy,
+                &config,
+                &child_cwd,
+                team_context.as_ref().map(|context| &context.identity),
+                definition.omit_project_rules,
+            ) {
                 Ok(prompt) => Some(prompt),
                 Err(error) => {
                     return SubAgentResult {
@@ -207,6 +340,11 @@ impl AgentSpawner {
             &self.runtime_env,
             definition.name == "explore",
         );
+        if let Some(context) = &team_context
+            && child_policy.allows("SendMessage")
+        {
+            tools.register(Box::new(SendMessageTool::new(Arc::new(context.runtime.clone()))));
+        }
         if spec.depth + 1 < config.subagent.depth && child_policy.allows("Spawn") {
             tools.register(Box::new(crate::spawn_tool::SpawnTool::for_depth(
                 Arc::new(self.clone()),
@@ -293,6 +431,9 @@ impl AgentSpawner {
         engine.set_initial_reasoning_effort(overrides.effort.or(definition.effort));
         engine.set_temperature(definition.temperature);
         engine.set_tool_policy(child_policy);
+        if let Some(context) = &team_context {
+            engine.set_team_inbox(Arc::clone(&context.inbox));
+        }
         if let Some(source) = plan_source {
             engine.set_todo_runtime(TodoRuntime::new(source, reminder_turns));
         }
@@ -368,6 +509,57 @@ impl AgentSpawner {
         );
         result
     }
+}
+
+struct PersistentContext {
+    identity: SubAgentIdentity,
+    runtime: InProcessTeamRuntime,
+    inbox: Arc<TeammateInbox>,
+}
+
+struct MemberExitGuard {
+    runtime: Arc<InProcessTeamRuntime>,
+    name: AgentName,
+}
+
+impl Drop for MemberExitGuard {
+    fn drop(&mut self) {
+        self.runtime.member_exited(&self.name);
+    }
+}
+
+fn persistent_context(runtime: Option<&InProcessTeamRuntime>, raw_name: &str) -> Result<PersistentContext, String> {
+    let runtime = runtime.ok_or_else(|| "Team mode is disabled".to_string())?;
+    let name = AgentName::new(raw_name).map_err(|error| error.to_string())?;
+    let team = runtime
+        .current_team()
+        .ok_or_else(|| "No active team; call TeamCreate first".to_string())?;
+    let actor = runtime.for_member(&name).map_err(|error| error.to_string())?;
+    let inbox = runtime
+        .inbox_for(&name)
+        .ok_or_else(|| format!("Team member '{name}' has no inbox"))?;
+    let teammates = runtime
+        .members()
+        .into_iter()
+        .filter(|member| member.name != name)
+        .map(|member| member.name.to_string())
+        .collect();
+    Ok(PersistentContext {
+        identity: SubAgentIdentity {
+            name: name.to_string(),
+            team: Some(team.id.to_string()),
+            teammates,
+        },
+        runtime: actor,
+        inbox,
+    })
+}
+
+fn add_usage(total: &mut TokenUsage, additional: &TokenUsage) {
+    total.input_tokens += additional.input_tokens;
+    total.output_tokens += additional.output_tokens;
+    total.cache_creation_tokens += additional.cache_creation_tokens;
+    total.cache_read_tokens += additional.cache_read_tokens;
 }
 
 fn protocol_status(status: SubAgentStatus) -> SubAgentEventStatus {
@@ -554,9 +746,18 @@ const REBUILT_FOR_CHILD: &[&str] = &[
     "TaskGet",
     "TaskUpdate",
     "ToolSearch",
+    "SendMessage",
 ];
 
-const NEVER_INHERITED: &[&str] = &["Skill", "Spawn", "EnterPlanMode", "ExitPlanMode"];
+const NEVER_INHERITED: &[&str] = &[
+    "Skill",
+    "Spawn",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "TeamCreate",
+    "TeamDelete",
+    "SendMessage",
+];
 
 pub(crate) fn project_tools(
     parent_tools: &[Arc<dyn Tool>],
