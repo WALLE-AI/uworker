@@ -129,6 +129,7 @@ name = "agentrs-memory"
 version = "0.2.11"
 dependencies = [
  "agentrs-config",
+ "async-trait",
  "chrono",
  "rstest",
  "serde",
@@ -136,6 +137,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "workspace-hack",
 ]

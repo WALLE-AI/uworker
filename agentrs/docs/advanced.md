@@ -295,7 +295,35 @@ Or through config:
 [memory]
 enabled = true
 dir = "/custom/path"   # same effect as AGENTRS_MEMORY_DIR
+
+[memory.recall]
+enabled = true
+model = "claude-haiku-4-5-20251001"   # defaults to the session model
+limit = 5                             # files injected per turn
+timeout_ms = 3000
 ```
+
+### Relevance Recall
+
+`MEMORY.md` is capped at 200 lines / 25 KB, which bounds how much a project can
+remember before the prompt stops describing all of it. Recall lifts that
+ceiling: each turn, a side query against a small model picks the few memory
+files that bear on what you just asked, and their full contents are injected
+for that turn.
+
+- Files already injected earlier in the session are withheld from the ranking,
+  so the per-turn budget goes to what the model has not seen yet.
+- Each injected memory is stamped with its age, and anything older than a day
+  carries a caveat telling the model to re-verify it against the current code.
+- Recall never gates a turn. A timeout, a provider error, or an unparseable
+  answer all degrade to injecting nothing.
+- With an empty memory directory, or when everything has already been surfaced,
+  no request is made at all.
+
+The cost is one extra model round trip per turn, bounded by `timeout_ms`. Point
+`model` at a small fast model — ranking filenames does not need the main
+model's capability or price — or set `enabled = false` to turn recall off and
+keep only the `MEMORY.md` index.
 
 ### Approvals
 

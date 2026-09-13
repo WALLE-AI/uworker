@@ -9,6 +9,7 @@ use super::{
 
 #[cfg(test)]
 mod tests_set_config {
+    use agentrs_config::memory::RecallConfig;
     use std::sync::{Arc, Mutex};
 
     use agentrs_config::compat::ReasoningCompat;
@@ -78,6 +79,9 @@ mod tests_set_config {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -500,6 +504,47 @@ context_window = 200000
         assert!(engine.reasoning_effort.is_none());
         assert!(changes.iter().any(|c| c.contains("cleared")));
     }
+
+    // -- set_memory_runtime: recall stays inert with nothing to work with -----
+
+    #[tokio::test]
+    async fn recall_is_skipped_without_a_memory_directory_or_a_query() {
+        let mut engine = make_engine("test-model");
+        assert!(engine.recall_memories("anything").await.is_none());
+
+        let directory = tempdir().unwrap();
+        engine.set_memory_runtime(Some(directory.path().to_path_buf()), true, RecallConfig::default());
+        assert!(
+            engine.recall_memories("   ").await.is_none(),
+            "a blank query gives the selector nothing to rank"
+        );
+        assert!(
+            engine.recall_memories("anything").await.is_none(),
+            "an empty directory has no candidates"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_recall_in_config_stops_it_entirely() {
+        let directory = tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("user_role.md"),
+            "---
+name: user_role
+description: d
+type: user
+---
+
+body",
+        )
+        .unwrap();
+        let mut engine = make_engine("test-model");
+        let mut recall = RecallConfig::default();
+        recall.enabled = false;
+        engine.set_memory_runtime(Some(directory.path().to_path_buf()), true, recall);
+
+        assert!(engine.recall_memories("anything").await.is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +618,9 @@ mod tests_phase6 {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -873,6 +921,9 @@ mod tests_compact {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -1676,6 +1727,9 @@ mod tests_plan_mode {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -1911,6 +1965,9 @@ mod tests_handle_command {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -2951,6 +3008,9 @@ mod tests_tool_policy_enforcement {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -3128,6 +3188,9 @@ mod tests_todo {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: Default::default(),
+            surfaced_memories: Default::default(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -3426,5 +3489,57 @@ mod tests_todo {
 
         engine.todo.as_ref().expect("runtime attached").on_user_turn_start();
         assert!(store.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory recall — shaping the recall query and the recent-tool list
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests_memory_recall {
+    use agentrs_types::message::ContentBlock;
+
+    use crate::engine::{tool_names, user_query_text};
+
+    #[test]
+    fn the_recall_query_is_the_user_text_and_nothing_else() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "how do I run the migration".into(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call".into(),
+                content: "irrelevant".into(),
+                is_error: false,
+            },
+            ContentBlock::Text {
+                text: "on staging".into(),
+            },
+        ];
+
+        assert_eq!(
+            user_query_text(&blocks),
+            "how do I run the migration
+on staging",
+            "only text blocks carry ranking signal for a filename selector"
+        );
+        assert!(user_query_text(&[]).is_empty());
+    }
+
+    #[test]
+    fn recent_tool_names_are_deduplicated() {
+        let call = |name: &str, id: &str| ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: serde_json::json!({}),
+            extra: None,
+        };
+
+        assert_eq!(
+            tool_names(&[call("Grep", "a"), call("Read", "b"), call("Grep", "c")]),
+            vec!["Grep".to_string(), "Read".to_string()]
+        );
+        assert!(tool_names(&[]).is_empty());
     }
 }

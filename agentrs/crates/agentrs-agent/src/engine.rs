@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::mem::replace;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::commands::{CommandContext, CommandRegistry, CommandResult, CommandSpec, SlashCommand, default_registry};
@@ -16,6 +18,7 @@ use crate::context_usage::{
     estimate_tool_definitions_tokens,
 };
 use crate::error::AgentError;
+use crate::memory::recall::ProviderMemorySelector;
 use crate::memory::telemetry::record_memory_reads;
 use crate::memory::watch::observe_memory_writes;
 use crate::orchestration::{
@@ -41,8 +44,11 @@ use agentrs_config::compact::CompactConfig;
 use agentrs_config::compat::ProviderCompat;
 use agentrs_config::config::{CompactContextWindowSource, Config};
 use agentrs_config::hooks::HookEngine;
+use agentrs_config::memory::RecallConfig;
 use agentrs_memory::paths::ENTRYPOINT_NAME;
 use agentrs_memory::prompt::{build_memory_prompt, build_memory_prompt_minimal};
+use agentrs_memory::recall::{RecallRequest, find_relevant_memories, render_recalled_memories};
+use agentrs_memory::types::MemoryHeader;
 use agentrs_protocol::ToolApprovalManager;
 use agentrs_protocol::events::ToolCategory;
 use agentrs_protocol::writer::ProtocolEmitter;
@@ -154,6 +160,15 @@ pub struct AgentEngine {
     memory_prompt: Option<String>,
     memory_full_instructions: bool,
     memory_written_this_turn: bool,
+    /// Relevance-recall settings for this session.
+    memory_recall: RecallConfig,
+    /// Memory files already injected this session. Recall withholds them from
+    /// the selector so the Top-N budget goes to files the model cannot
+    /// already see.
+    surfaced_memories: HashSet<PathBuf>,
+    /// Tool names from the previous round, so recall can suppress reference
+    /// material for a tool already in play.
+    recent_tools: Vec<String>,
 
     // Output and host protocol integration.
     /// Sink for user-visible and host-visible output events.
@@ -276,6 +291,9 @@ impl AgentEngine {
             current_session: None,
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: RecallConfig::default(),
+            surfaced_memories: HashSet::new(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -391,6 +409,9 @@ impl AgentEngine {
             current_session: Some(session),
             memory_dir: None,
             memory_approval_dir: None,
+            memory_recall: RecallConfig::default(),
+            surfaced_memories: HashSet::new(),
+            recent_tools: Vec::new(),
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -457,7 +478,12 @@ impl AgentEngine {
     /// `approval_carve_out` says whether that directory earned the permission
     /// carve-out; the caller decides, because only it knows whether the path
     /// was defaulted or supplied by the user.
-    pub(crate) fn set_memory_runtime(&mut self, memory_dir: Option<PathBuf>, approval_carve_out: bool) {
+    pub(crate) fn set_memory_runtime(
+        &mut self,
+        memory_dir: Option<PathBuf>,
+        approval_carve_out: bool,
+        recall: RecallConfig,
+    ) {
         self.memory_prompt = memory_dir.as_deref().map(build_memory_prompt_minimal);
         self.memory_approval_dir = if approval_carve_out { memory_dir.clone() } else { None };
         // The terminal path decides through the confirmer and the host path
@@ -467,6 +493,54 @@ impl AgentEngine {
             .unwrap()
             .set_memory_dir(self.memory_approval_dir.clone());
         self.memory_dir = memory_dir;
+        self.memory_recall = recall;
+    }
+
+    /// Pick the memories worth injecting for this turn and render them.
+    ///
+    /// Returns `None` whenever nothing should be injected — memory disabled,
+    /// recall disabled, no unseen candidates, or a selector that failed. The
+    /// caller treats all of those identically.
+    async fn recall_memories(&mut self, query: &str) -> Option<String> {
+        if !self.memory_recall.enabled || query.trim().is_empty() {
+            return None;
+        }
+        let selected = self.select_memories(query).await;
+        if selected.is_empty() {
+            return None;
+        }
+        // Record before rendering: a file that turns out to be unreadable was
+        // still spent from the budget, and retrying it next turn would keep
+        // crowding out candidates that can actually be read.
+        for header in &selected {
+            self.surfaced_memories.insert(header.file_path.clone());
+        }
+        render_recalled_memories(&selected)
+    }
+
+    async fn select_memories(&self, query: &str) -> Vec<MemoryHeader> {
+        let Some(memory_dir) = self.memory_dir.as_deref() else {
+            return Vec::new();
+        };
+        // The side query runs on the configured model, falling back to the
+        // session's. A smaller model is the point of the setting: ranking
+        // filenames does not need the main model's capability or price.
+        let selector = ProviderMemorySelector::new(
+            Arc::clone(&self.provider),
+            self.memory_recall.model.clone().unwrap_or_else(|| self.model.clone()),
+            Duration::from_millis(self.memory_recall.timeout_ms),
+        );
+        find_relevant_memories(
+            RecallRequest {
+                query,
+                memory_dir,
+                recent_tools: &self.recent_tools,
+                already_surfaced: &self.surfaced_memories,
+                limit: self.memory_recall.limit,
+            },
+            &selector,
+        )
+        .await
     }
 
     /// Get the current session ID (if sessions are enabled and initialized)
@@ -630,6 +704,15 @@ impl AgentEngine {
 
         self.append_team_messages_to(&mut content_blocks);
 
+        // Recall has to run before the user message is committed, because the
+        // recalled block rides along inside it. There is nothing to overlap
+        // with, so the wait is bounded by `memory.recall.timeout_ms` instead of
+        // being hidden behind other work; when the directory holds no unseen
+        // candidates no request is made at all and the wait is zero.
+        if let Some(recalled) = self.recall_memories(&user_query_text(&content_blocks)).await {
+            content_blocks.push(ContentBlock::Text { text: recalled });
+        }
+
         let user_tokens = estimate_content_tokens(&content_blocks);
         self.push_history(Role::User, content_blocks);
         self.record_local_context_addition(user_tokens);
@@ -741,6 +824,7 @@ impl AgentEngine {
             } = self.execute_tool_round(&tool_calls).await?;
 
             record_memory_reads(&tool_calls, self.memory_dir.as_deref());
+            self.recent_tools = tool_names(&tool_calls);
             if let Some(observation) =
                 observe_memory_writes(&tool_calls, self.memory_dir.as_deref(), self.memory_full_instructions)
             {
@@ -1972,6 +2056,36 @@ fn append_tool_loop_warning(tool_results: &mut [ContentBlock], warning: ToolLoop
 
 /// Assemble the assistant message content blocks (thinking, text, tool calls)
 /// from a completed [`StreamOutcome`], preserving the canonical block order.
+/// The text the user actually typed, as the recall query.
+///
+/// Non-text blocks (images, pasted attachments) carry no ranking signal for a
+/// filename selector, and team messages appended earlier are not the user's
+/// request, so only the text blocks are joined.
+fn user_query_text(content_blocks: &[ContentBlock]) -> String {
+    content_blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Names of the tools invoked in one round, deduplicated.
+fn tool_names(tool_calls: &[ContentBlock]) -> Vec<String> {
+    let mut names: Vec<String> = tool_calls
+        .iter()
+        .filter_map(|call| match call {
+            ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn build_assistant_content(outcome: &StreamOutcome) -> Vec<ContentBlock> {
     let mut content = outcome.provider_items.clone();
     if !outcome.thinking_text.is_empty() || outcome.thinking_signature.is_some() {

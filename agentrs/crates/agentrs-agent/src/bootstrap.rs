@@ -204,6 +204,8 @@ impl AgentBootstrap {
 
         let has_mcp = mcp.has_mcp();
         let mcp_managers = mcp.managers;
+        // Read before `into_engine` consumes the builder.
+        let memory_recall = self.config.memory.recall.clone();
         let mut engine = self.into_engine(
             provider.clone(),
             registry,
@@ -213,7 +215,11 @@ impl AgentBootstrap {
             prompt_usage,
         );
         engine.set_subagent_runtime(subagent_registry.registry, subagent_registry.parent_session);
-        engine.set_memory_runtime(environment.memory_dir.clone(), environment.memory_dir_is_default);
+        engine.set_memory_runtime(
+            environment.memory_dir.clone(),
+            environment.memory_dir_is_default,
+            memory_recall,
+        );
         if let Some(inbox) = subagent_registry.team_inbox {
             engine.set_team_inbox(inbox);
         }
