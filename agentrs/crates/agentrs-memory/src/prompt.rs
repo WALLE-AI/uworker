@@ -214,6 +214,73 @@ line per entry, never write content directly into it.
 Before saving, read existing memories to avoid duplicates. \
 Verify file/function names from memory still exist before recommending them.";
 
+// ---------------------------------------------------------------------------
+// Searching past context
+// ---------------------------------------------------------------------------
+
+/// Where past context can be searched, and with which tool.
+///
+/// Both fields are runtime facts the memory crate cannot discover on its own:
+/// whether sessions are persisted at all, and whether the current tool policy
+/// authorizes `Grep`.
+pub struct PastContextSearch<'a> {
+    /// Root of the saved session records, or `None` when persistence is off.
+    pub session_dir: Option<&'a Path>,
+    /// Whether the `Grep` tool is available this session.
+    pub grep_available: bool,
+}
+
+impl PastContextSearch<'_> {
+    /// Render the retrieval guidance, or `None` when there is nothing to say
+    /// beyond what the rest of the prompt already covers.
+    fn render(&self, memory_dir: &Path) -> String {
+        let memory_dir = memory_dir.display();
+        let mut lines = vec![
+            "## Searching past context".to_owned(),
+            String::new(),
+            "When you need something from earlier work that is not in this conversation:".to_owned(),
+            String::new(),
+        ];
+
+        lines.push(format!(
+            "1. Search your memory directory first — it is small and curated:\n   {}",
+            self.search_hint(&memory_dir.to_string(), "*.md")
+        ));
+        if let Some(session_dir) = self.session_dir {
+            // Transcripts hold everything but cost the most to read, so they
+            // are named last and named as a last resort.
+            lines.push(format!(
+                "2. Saved session records, only as a last resort — they are large and slow to scan:\n   {}",
+                self.search_hint(&session_dir.display().to_string(), SESSION_RECORD_NAME)
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push(
+            "Use a narrow search term — an error message, a file path, a function name. \
+             A broad keyword matches most of a transcript and tells you nothing about \
+             where to look."
+                .to_owned(),
+        );
+        lines.join("\n")
+    }
+
+    fn search_hint(&self, path: &str, glob: &str) -> String {
+        if self.grep_available {
+            format!("Grep with pattern=\"<search term>\" path=\"{path}\" glob=\"{glob}\"")
+        } else {
+            // Grep is not authorized, so name the shell tool instead and leave
+            // the concrete command to the model — it knows the platform.
+            format!(
+                "ExecCommand, searching `{path}` for the term across `{glob}` files (the Grep tool is not available in this session)"
+            )
+        }
+    }
+}
+
+/// Filename each session is persisted under, used to narrow transcript search.
+const SESSION_RECORD_NAME: &str = "state.json";
+
 // ===========================================================================
 // Public API
 // ===========================================================================
@@ -263,7 +330,12 @@ pub fn build_memory_prompt_minimal(memory_dir: &Path) -> String {
 ///
 /// This is the all-in-one function used when the caller needs a single
 /// string to inject into the system prompt.
-pub fn build_memory_prompt(memory_dir: &Path) -> String {
+///
+/// `search` adds the retrieval guidance. It rides on the full tier only: the
+/// minimal tier is what a session that has never written a memory sees, and
+/// telling it how to dig through transcripts before it has anything to dig for
+/// spends tokens on a question it is not asking.
+pub fn build_memory_prompt(memory_dir: &Path, search: PastContextSearch<'_>) -> String {
     let mut lines = build_memory_instructions(memory_dir);
 
     let entrypoint = memory_dir.join(ENTRYPOINT_NAME);
@@ -283,6 +355,9 @@ pub fn build_memory_prompt(memory_dir: &Path) -> String {
         lines.push(String::new());
         lines.push(truncation.content);
     }
+
+    lines.push(String::new());
+    lines.push(search.render(memory_dir));
 
     lines.join("\n")
 }

@@ -316,7 +316,16 @@ Mouse capture is deliberately disabled. Drag across any visible conversation
 text and use the terminal's normal copy shortcut (`Cmd+C` on macOS or usually
 `Ctrl+Shift+C` on Linux/Windows terminals).
 
-Agent commands are `/compact`, `/context`, `/clear`, `/help`, and `/quit`.
+Agent commands are `/compact`, `/context`, `/clear`, `/memory`, `/help`, and
+`/quit`. `/memory` takes subcommands:
+
+| Command | Description |
+|---------|-------------|
+| `/memory` | List stored memories with their type, age, and description |
+| `/memory show <file>` | Print one memory in full |
+| `/memory rm <file>` | Delete a memory and its `MEMORY.md` index entry |
+| `/memory path` | Print the memory directory |
+
 The interactive UI also provides:
 
 | Command | Description |

@@ -7,6 +7,7 @@ use std::fs;
 
 use agentrs_memory::index;
 use agentrs_memory::paths;
+use agentrs_memory::prompt::PastContextSearch;
 use agentrs_memory::prompt::build_memory_prompt;
 use agentrs_memory::store;
 use agentrs_memory::types::{MemoryEntry, MemoryType};
@@ -62,7 +63,7 @@ fn tc_8_1_complete_memory_lifecycle() {
     );
 
     // 5. Build prompt — should include MEMORY.md content
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
     assert!(prompt.contains(filename), "prompt should reference the memory file");
     assert!(
         prompt.contains("integration tests must hit real DB"),
@@ -129,7 +130,7 @@ fn tc_8_2_chinese_content_roundtrip() {
     assert!(index_content.contains("资深后端工程师"));
 
     // Prompt — should include Chinese index content
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
     assert!(prompt.contains("用户角色"));
     assert!(prompt.contains("资深后端工程师"));
 }
@@ -186,4 +187,12 @@ fn tc_8_3_name_with_only_special_chars() {
     // Content should round-trip
     let read_back = store::read_memory(&path).unwrap();
     assert_eq!(read_back.content, "Some body");
+}
+
+/// Default search guidance for tests that do not care about it.
+fn no_search() -> PastContextSearch<'static> {
+    PastContextSearch {
+        session_dir: None,
+        grep_available: true,
+    }
 }

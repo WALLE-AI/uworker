@@ -1,5 +1,13 @@
 use super::*;
 
+/// Default search guidance for tests that do not care about it.
+fn no_search() -> PastContextSearch<'static> {
+    PastContextSearch {
+        session_dir: None,
+        grep_available: true,
+    }
+}
+
 // ===========================================================================
 // Unit tests
 // ===========================================================================
@@ -136,7 +144,7 @@ mod tests {
 
     #[test]
     fn prompt_with_nonexistent_dir_shows_empty_state() {
-        let result = build_memory_prompt(Path::new("/nonexistent/memory/dir"));
+        let result = build_memory_prompt(Path::new("/nonexistent/memory/dir"), no_search());
         assert!(result.contains(ENTRYPOINT_NAME));
         assert!(result.contains("currently empty"));
     }
@@ -149,7 +157,7 @@ mod tests {
         let index_path = mem_dir.join(ENTRYPOINT_NAME);
         std::fs::write(&index_path, "- [Role](user_role.md) \u{2014} user role info\n").unwrap();
 
-        let result = build_memory_prompt(&mem_dir);
+        let result = build_memory_prompt(&mem_dir, no_search());
         assert!(result.contains("user_role.md"));
         assert!(result.contains("user role info"));
         assert!(!result.contains("currently empty"));
@@ -163,7 +171,7 @@ mod tests {
         let index_path = mem_dir.join(ENTRYPOINT_NAME);
         std::fs::write(&index_path, "").unwrap();
 
-        let result = build_memory_prompt(&mem_dir);
+        let result = build_memory_prompt(&mem_dir, no_search());
         assert!(result.contains("currently empty"));
     }
 
@@ -175,7 +183,7 @@ mod tests {
         let index_path = mem_dir.join(ENTRYPOINT_NAME);
         std::fs::write(&index_path, "- [A](a.md) \u{2014} test\n").unwrap();
 
-        let result = build_memory_prompt(&mem_dir);
+        let result = build_memory_prompt(&mem_dir, no_search());
 
         // Instructions (type descriptions) should appear before the index content
         let types_pos = result.find("## Types of memory").unwrap();
@@ -199,7 +207,7 @@ mod tests {
             .collect();
         std::fs::write(&index_path, &content).unwrap();
 
-        let result = build_memory_prompt(&mem_dir);
+        let result = build_memory_prompt(&mem_dir, no_search());
         assert!(result.contains("WARNING"));
     }
 
@@ -278,7 +286,7 @@ mod tests {
         std::fs::create_dir_all(&mem_dir).unwrap();
         std::fs::write(mem_dir.join(ENTRYPOINT_NAME), "- [A](a.md) \u{2014} test\n").unwrap();
 
-        let full = build_memory_prompt(&mem_dir);
+        let full = build_memory_prompt(&mem_dir, no_search());
         let minimal = build_memory_prompt_minimal(&mem_dir);
 
         assert!(
@@ -291,7 +299,7 @@ mod tests {
 
     #[test]
     fn full_prompt_contains_full_taxonomy() {
-        let result = build_memory_prompt(Path::new("/test/memory"));
+        let result = build_memory_prompt(Path::new("/test/memory"), no_search());
         assert!(
             result.contains("## Types of memory"),
             "full prompt should contain type taxonomy"

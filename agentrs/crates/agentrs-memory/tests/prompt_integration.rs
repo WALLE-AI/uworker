@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 
+use agentrs_memory::prompt::PastContextSearch;
 use agentrs_memory::prompt::{build_memory_instructions, build_memory_prompt, memory_type_descriptions};
 
 // ---------------------------------------------------------------------------
@@ -18,7 +19,7 @@ fn tc_6_1_prompt_contains_all_required_parts() {
     let mem_dir = tmp.path().join("memory");
     fs::create_dir_all(&mem_dir).unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     // Memory system introduction
     assert!(
@@ -66,7 +67,7 @@ fn tc_6_2_prompt_includes_memory_dir_path() {
     let mem_dir = tmp.path().join("my_project_memory");
     fs::create_dir_all(&mem_dir).unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         prompt.contains(&mem_dir.display().to_string()),
@@ -88,7 +89,7 @@ fn tc_6_3_prompt_includes_memory_md_content() {
                          - [Test Policy](feedback_tests.md) \u{2014} always use real DB\n";
     fs::write(mem_dir.join("MEMORY.md"), index_content).unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         prompt.contains("user_role.md"),
@@ -115,7 +116,7 @@ fn tc_6_4_no_memory_md_shows_empty_message() {
     fs::create_dir_all(&mem_dir).unwrap();
     // No MEMORY.md file created
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         prompt.contains("currently empty"),
@@ -130,7 +131,7 @@ fn tc_6_4_empty_memory_md_shows_empty_message() {
     fs::create_dir_all(&mem_dir).unwrap();
     fs::write(mem_dir.join("MEMORY.md"), "").unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         prompt.contains("currently empty"),
@@ -145,7 +146,7 @@ fn tc_6_4_whitespace_only_memory_md_shows_empty_message() {
     fs::create_dir_all(&mem_dir).unwrap();
     fs::write(mem_dir.join("MEMORY.md"), "   \n\n  ").unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         prompt.contains("currently empty"),
@@ -164,7 +165,7 @@ fn tc_6_5_no_bb_brand_in_prompt() {
     fs::create_dir_all(&mem_dir).unwrap();
     fs::write(mem_dir.join("MEMORY.md"), "- [Test](test.md) \u{2014} entry\n").unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         !prompt.contains("~/.claude"),
@@ -241,7 +242,7 @@ fn prompt_with_large_index_includes_truncation_warning() {
         .collect();
     fs::write(mem_dir.join("MEMORY.md"), &content).unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     assert!(
         prompt.contains("WARNING"),
@@ -279,7 +280,7 @@ fn type_descriptions_standalone() {
 fn prompt_nonexistent_dir_succeeds() {
     // build_memory_prompt should not panic even if the directory doesn't exist
     // (read_index returns empty string for missing files)
-    let result = build_memory_prompt(Path::new("/nonexistent/path/memory"));
+    let result = build_memory_prompt(Path::new("/nonexistent/path/memory"), no_search());
     assert!(result.contains("currently empty"));
 }
 
@@ -290,7 +291,7 @@ fn prompt_sections_appear_in_correct_order() {
     fs::create_dir_all(&mem_dir).unwrap();
     fs::write(mem_dir.join("MEMORY.md"), "- [A](a.md) \u{2014} test\n").unwrap();
 
-    let prompt = build_memory_prompt(&mem_dir);
+    let prompt = build_memory_prompt(&mem_dir, no_search());
 
     // Verify section ordering
     let positions = [
@@ -320,4 +321,100 @@ fn prompt_sections_appear_in_correct_order() {
             nums[i - 1]
         );
     }
+}
+
+/// Default search guidance for tests that do not care about it.
+fn no_search() -> PastContextSearch<'static> {
+    PastContextSearch {
+        session_dir: None,
+        grep_available: true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Searching past context
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_full_prompt_tells_the_model_where_to_look_for_past_context() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mem_dir = tmp.path().join("memory");
+    fs::create_dir_all(&mem_dir).unwrap();
+    let session_dir = tmp.path().join("sessions");
+
+    let prompt = agentrs_memory::prompt::build_memory_prompt(
+        &mem_dir,
+        PastContextSearch {
+            session_dir: Some(&session_dir),
+            grep_available: true,
+        },
+    );
+
+    assert!(prompt.contains("## Searching past context"));
+    assert!(
+        prompt.contains(&format!("path=\"{}\"", mem_dir.display())),
+        "the memory directory must be named as the first place to look"
+    );
+    assert!(
+        prompt.contains(&format!("path=\"{}\"", session_dir.display())),
+        "session records must be named as the fallback"
+    );
+    assert!(
+        prompt.find("memory directory first").unwrap() < prompt.find("last resort").unwrap(),
+        "the cheap source must be ordered before the expensive one"
+    );
+}
+
+// The minimal tier is what a session that has never written a memory sees;
+// teaching it to dig through transcripts spends tokens on an unasked question.
+#[test]
+fn the_minimal_prompt_omits_the_search_guidance() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mem_dir = tmp.path().join("memory");
+    fs::create_dir_all(&mem_dir).unwrap();
+
+    let prompt = agentrs_memory::prompt::build_memory_prompt_minimal(&mem_dir);
+
+    assert!(!prompt.contains("Searching past context"));
+}
+
+#[test]
+fn session_records_are_not_mentioned_when_persistence_is_off() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mem_dir = tmp.path().join("memory");
+    fs::create_dir_all(&mem_dir).unwrap();
+
+    let prompt = agentrs_memory::prompt::build_memory_prompt(
+        &mem_dir,
+        PastContextSearch {
+            session_dir: None,
+            grep_available: true,
+        },
+    );
+
+    assert!(prompt.contains("## Searching past context"));
+    assert!(
+        !prompt.contains("last resort"),
+        "there is no transcript to fall back to"
+    );
+}
+
+// A prompt that names an unavailable tool teaches the model to waste a turn
+// discovering it cannot be called.
+#[test]
+fn the_shell_tool_is_named_when_grep_is_not_authorized() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mem_dir = tmp.path().join("memory");
+    fs::create_dir_all(&mem_dir).unwrap();
+
+    let prompt = agentrs_memory::prompt::build_memory_prompt(
+        &mem_dir,
+        PastContextSearch {
+            session_dir: None,
+            grep_available: false,
+        },
+    );
+
+    assert!(prompt.contains("ExecCommand"));
+    assert!(!prompt.contains("Grep with pattern"));
 }

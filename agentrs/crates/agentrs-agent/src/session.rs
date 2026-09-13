@@ -85,6 +85,11 @@ impl SessionManager {
         }
     }
 
+    /// Root directory holding the saved session records.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     /// Create a new session, return it
     pub fn create(&self, provider: &str, model: &str, cwd: &str, session_id: Option<&str>) -> anyhow::Result<Session> {
         let id = if let Some(custom_id) = session_id {

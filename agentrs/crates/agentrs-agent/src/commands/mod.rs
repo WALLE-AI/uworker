@@ -2,6 +2,7 @@ pub mod clear;
 pub mod compact;
 mod context;
 pub mod help;
+mod memory;
 pub mod quit;
 mod registry;
 

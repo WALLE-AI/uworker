@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agentrs_config::shell::{ResolvedShell, default_shell, render_shell_prompt};
-use agentrs_memory::prompt::{build_memory_prompt, build_memory_prompt_minimal};
+use agentrs_memory::prompt::{PastContextSearch, build_memory_prompt, build_memory_prompt_minimal};
 use agentrs_skills::prompt::format_skills_within_budget;
 use agentrs_skills::types::SkillMetadata;
 use agentrs_types::message::{ContentBlock, Message, Role};
@@ -31,6 +31,10 @@ pub struct SystemPromptCache {
     pub(crate) last_tool_policy: ToolPolicy,
     /// Upgrades once the model first writes into the memory directory.
     pub(crate) memory_full_instructions: bool,
+    /// Root of the saved session records, when persistence is enabled. Feeds
+    /// the memory section's retrieval guidance; the builder cannot discover it
+    /// because session storage is the agent crate's concern.
+    pub(crate) session_dir: Option<PathBuf>,
 }
 
 impl SystemPromptCache {
@@ -43,6 +47,7 @@ impl SystemPromptCache {
             last_shell_prompt: None,
             last_tool_policy: ToolPolicy::default(),
             memory_full_instructions: false,
+            session_dir: None,
         }
     }
 
@@ -286,9 +291,13 @@ pub(crate) fn build_system_prompt_with_shell_and_tool_policy(
     // and examples. The full instructions are available via build_memory_prompt().
     if let Some(dir) = memory_dir {
         let full = cache.memory_full_instructions;
+        let search = PastContextSearch {
+            session_dir: cache.session_dir.as_deref(),
+            grep_available: tool_policy.allows("Grep"),
+        };
         let memory_section = cache.sections.entry("memory").or_insert_with(|| {
             if full {
-                build_memory_prompt(dir)
+                build_memory_prompt(dir, search)
             } else {
                 build_memory_prompt_minimal(dir)
             }

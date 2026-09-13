@@ -31,7 +31,9 @@ mod tests {
     #[test]
     fn registry_all_returns_all_commands() {
         let registry = default_registry();
-        assert_eq!(registry.all().len(), 5);
+        let mut names: Vec<&str> = registry.all().iter().map(|command| command.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["clear", "compact", "context", "help", "memory", "quit"]);
     }
 
     #[test]

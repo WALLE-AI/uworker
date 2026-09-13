@@ -1,8 +1,9 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{clear, compact, context, help, quit};
+use super::{clear, compact, context, help, memory, quit};
 use crate::compact::state::CompactState;
 use crate::context_usage::{ContextState, PromptUsage};
 use crate::output::OutputSink;
@@ -44,6 +45,8 @@ pub struct CommandContext<'a> {
     pub(crate) context_state: &'a mut ContextState,
     pub(crate) prompt_usage: &'a PromptUsage,
     pub(crate) context_tools: &'a [ToolDef],
+    /// Memory directory for this session, or `None` when memory is disabled.
+    pub(crate) memory_dir: Option<&'a Path>,
     pub(crate) dynamic_system_tokens: u64,
 }
 
@@ -110,6 +113,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(compact::CompactCommand));
     registry.register(Box::new(context::ContextCommand));
     registry.register(Box::new(clear::ClearCommand));
+    registry.register(Box::new(memory::MemoryCommand));
     registry.register(Box::new(help::HelpCommand));
     registry.register(Box::new(quit::QuitCommand));
     registry

@@ -46,7 +46,7 @@ use agentrs_config::config::{CompactContextWindowSource, Config};
 use agentrs_config::hooks::HookEngine;
 use agentrs_config::memory::RecallConfig;
 use agentrs_memory::paths::ENTRYPOINT_NAME;
-use agentrs_memory::prompt::{build_memory_prompt, build_memory_prompt_minimal};
+use agentrs_memory::prompt::{PastContextSearch, build_memory_prompt, build_memory_prompt_minimal};
 use agentrs_memory::recall::{RecallRequest, find_relevant_memories, render_recalled_memories};
 use agentrs_memory::types::MemoryHeader;
 use agentrs_protocol::ToolApprovalManager;
@@ -877,7 +877,13 @@ impl AgentEngine {
             return;
         };
         let next = if self.memory_full_instructions {
-            build_memory_prompt(directory)
+            build_memory_prompt(
+                directory,
+                PastContextSearch {
+                    session_dir: self.session_manager.as_ref().map(SessionManager::directory),
+                    grep_available: self.tool_policy.allows("Grep"),
+                },
+            )
         } else {
             build_memory_prompt_minimal(directory)
         };
@@ -1789,6 +1795,7 @@ impl AgentEngine {
             context_state: &mut self.context_state,
             prompt_usage: &self.prompt_usage,
             context_tools: &context_tools,
+            memory_dir: self.memory_dir.as_deref(),
             dynamic_system_tokens,
         };
 

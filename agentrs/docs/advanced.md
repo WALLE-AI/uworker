@@ -348,6 +348,18 @@ The carve-out is deliberately narrow:
 3. Agent reads/writes memory files using standard Read/Write tools
 4. Agent maintains the `MEMORY.md` index as memories are added or removed
 
+The prompt starts on a compact instruction set and upgrades to the full one the
+first time the agent writes a memory — the taxonomy and examples are only
+needed for writing, not reading. The full set also tells the agent where to
+look for context that is neither in the conversation nor in memory: the memory
+directory first, then saved session records as a last resort.
+
+### Reviewing What Is Stored
+
+Use `/memory` to list what the agent has saved, `/memory show <file>` to read
+one, and `/memory rm <file>` to delete a memory along with its index entry.
+This is also the way to audit what background writes have accumulated.
+
 Set `RUST_LOG=agentrs_memory=debug` to see how much memory a session loads
 (entry count, index size, staleness) and how often the agent reads it back.
 The logs record shape only — never filenames or memory content.

@@ -341,6 +341,12 @@ impl AgentBootstrap {
 
     fn configure_system_prompt(&mut self, environment: &BootstrapEnvironment, skills: &[SkillMetadata]) -> PromptUsage {
         let mut prompt_cache = SystemPromptCache::new();
+        // Only point the model at session records that actually exist.
+        prompt_cache.session_dir = self
+            .config
+            .session
+            .enabled
+            .then(|| PathBuf::from(&self.config.session.directory));
         let workspace = self.workspace.to_string_lossy();
         let mut system_prompt = build_system_prompt_with_shell_and_tool_policy(
             &mut prompt_cache,
