@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::mem::replace;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -18,6 +18,7 @@ use crate::context_usage::{
     estimate_tool_definitions_tokens,
 };
 use crate::error::AgentError;
+use crate::memory::extract::MemoryExtractor;
 use crate::memory::recall::ProviderMemorySelector;
 use crate::memory::telemetry::record_memory_reads;
 use crate::memory::watch::observe_memory_writes;
@@ -33,7 +34,7 @@ use crate::subagent::registry::SubAgentRegistry;
 use crate::team::{TeammateInbox, render_teammate_messages};
 use crate::todo_reminder::TodoRuntime;
 use crate::tool_call::{
-    DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, ToolCallFailureFingerprint,
+    DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, PolicyDenial, ToolCallFailureFingerprint,
     ToolCallMalformedFingerprint, merge_tool_results, tool_call_failure_fingerprint, tool_call_malformed_fingerprint,
     tool_call_malformed_reason,
 };
@@ -79,6 +80,12 @@ pub struct AgentResult {
 /// follows an empty final response. Some models put the intended tool call
 /// (or the whole answer) inside reasoning content; a normal turn with tools
 /// still available lets them recover, unlike the tool-less finalization path.
+/// How long session shutdown waits for a background extraction to land.
+///
+/// Long enough for a short model turn to finish writing, short enough that a
+/// stuck extraction cannot hold the process open.
+const EXTRACTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 const EMPTY_FINAL_RETRY_PROMPT: &str = "The previous response contained no visible answer text. Respond again now: provide the answer as visible text, or issue the intended tool call as a proper tool call. Do not leave the answer or tool calls inside reasoning.";
 
 pub struct AgentEngine {
@@ -169,6 +176,11 @@ pub struct AgentEngine {
     /// Tool names from the previous round, so recall can suppress reference
     /// material for a tool already in play.
     recent_tools: Vec<String>,
+    /// Background extraction, when `memory.extract.enabled` is on.
+    memory_extractor: Option<Arc<MemoryExtractor>>,
+    /// History index already handed to an extraction pass, so a long session
+    /// re-reads only what is new.
+    extract_cursor: usize,
 
     // Output and host protocol integration.
     /// Sink for user-visible and host-visible output events.
@@ -294,6 +306,8 @@ impl AgentEngine {
             memory_recall: RecallConfig::default(),
             surfaced_memories: HashSet::new(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -412,6 +426,8 @@ impl AgentEngine {
             memory_recall: RecallConfig::default(),
             surfaced_memories: HashSet::new(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -494,6 +510,40 @@ impl AgentEngine {
             .set_memory_dir(self.memory_approval_dir.clone());
         self.memory_dir = memory_dir;
         self.memory_recall = recall;
+    }
+
+    pub(crate) fn set_memory_extractor(&mut self, extractor: Arc<MemoryExtractor>) {
+        self.memory_extractor = Some(extractor);
+    }
+
+    /// Hand the turn just finished to a background extraction pass.
+    ///
+    /// Skipped when the main agent already wrote memory this turn: it had the
+    /// full save instructions in its own prompt, so a second pass would at best
+    /// duplicate its work and at worst argue with it.
+    fn extract_memories(&mut self) {
+        let Some(extractor) = self.memory_extractor.as_ref() else {
+            return;
+        };
+        if !extractor.enabled() {
+            return;
+        }
+        if self.memory_written_this_turn {
+            tracing::debug!(target: "agentrs_memory", "extraction skipped; the agent already wrote memory this turn");
+            self.extract_cursor = self.messages.len();
+            return;
+        }
+        let cursor = self.extract_cursor.min(self.messages.len());
+        let started = extractor.spawn_extraction(&self.messages[cursor..]);
+        tracing::debug!(target: "agentrs_memory", started, messages = self.messages.len() - cursor, "memory extraction considered");
+        self.extract_cursor = self.messages.len();
+    }
+
+    /// Wait for an in-flight extraction so the process does not exit mid-write.
+    pub async fn drain_memory_extraction(&self, timeout: Duration) {
+        if let Some(extractor) = self.memory_extractor.as_ref() {
+            extractor.drain(timeout).await;
+        }
     }
 
     /// Pick the memories worth injecting for this turn and render them.
@@ -660,7 +710,11 @@ impl AgentEngine {
             session_id = %session_id,
             msg_id = %msg_id,
         );
-        self.run_inner(content_blocks, msg_id).instrument(span).await
+        let result = self.run_inner(content_blocks, msg_id).instrument(span).await;
+        // The query loop is over either way; a turn that ended in an error can
+        // still have taught something worth keeping.
+        self.extract_memories();
+        result
     }
 
     /// Set the turn id for the NEXT run. Hosts that mint their own turn ids
@@ -984,27 +1038,37 @@ impl AgentEngine {
             })
             .collect();
         let tool_call_malformed_fingerprint = tool_call_malformed_fingerprint(tool_calls, &tool_call_malformed_reasons);
-        let policy_denied_tool_names: Vec<_> = tool_calls
+        let policy_denials: Vec<_> = tool_calls
             .iter()
             .zip(&tool_call_malformed_reasons)
             .map(|(call, malformed_reason)| {
                 if malformed_reason.is_some() {
                     return None;
                 }
-                let ContentBlock::ToolUse { name, .. } = call else {
+                let ContentBlock::ToolUse { name, input, .. } = call else {
                     return None;
                 };
                 let capability_denied = self
                     .tools
                     .get(name)
                     .is_some_and(|tool| tool.requires_image_input() && !self.compat.image_input().supports_images());
-                (!self.tool_policy.allows(name) || capability_denied).then(|| name.clone())
+                if !self.tool_policy.allows(name) || capability_denied {
+                    return Some(PolicyDenial::Unavailable(name.clone()));
+                }
+                // Confinement is judged here, alongside the name check, so a
+                // denied write never reaches the tool layer at all.
+                self.tool_policy
+                    .escapes_write_root(name, input)
+                    .then(|| PolicyDenial::OutsideWriteRoot {
+                        tool: name.clone(),
+                        write_root: self.tool_policy.write_root().unwrap_or(Path::new("")).to_path_buf(),
+                    })
             })
             .collect();
         let executable_tool_calls: Vec<_> = tool_calls
             .iter()
             .zip(&tool_call_malformed_reasons)
-            .zip(&policy_denied_tool_names)
+            .zip(&policy_denials)
             .filter(|((_, malformed_reason), denied_name)| malformed_reason.is_none() && denied_name.is_none())
             .map(|((call, _), _)| call.clone())
             .collect();
@@ -1066,7 +1130,7 @@ impl AgentEngine {
         let (tool_results, tool_modifiers) = merge_tool_results(
             tool_calls,
             &tool_call_malformed_reasons,
-            &policy_denied_tool_names,
+            &policy_denials,
             executable_results,
             executable_modifiers,
         );
@@ -2012,6 +2076,9 @@ impl AgentEngine {
 
     /// Run stop hooks when the agent session ends
     pub async fn run_stop_hooks(&self) {
+        // Drain before cancelling sub-agents: the extraction child is one of
+        // them, and cancelling it first would abandon a half-written memory.
+        self.drain_memory_extraction(EXTRACTION_DRAIN_TIMEOUT).await;
         if let Some(registry) = &self.subagent_registry {
             registry.cancel_all().await;
         }

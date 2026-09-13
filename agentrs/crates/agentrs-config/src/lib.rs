@@ -8,6 +8,7 @@ pub mod file_cache;
 pub mod hooks;
 pub mod logging;
 pub mod memory;
+pub mod paths;
 pub mod plan;
 pub mod schema;
 pub mod shell;

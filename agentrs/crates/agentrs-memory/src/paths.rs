@@ -8,6 +8,8 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
+use agentrs_config::paths::{is_within, normalize_lexical};
+
 use crate::error::{MemoryError, Result};
 
 /// MEMORY.md entrypoint filename.
@@ -77,21 +79,12 @@ pub fn memory_entrypoint(memory_dir: &Path) -> PathBuf {
 
 /// Check whether `path` belongs to the given memory directory.
 ///
-/// Both sides are canonicalized to prevent traversal bypasses through `..`
-/// segments or symlinks. A path that does not exist yet — the common case,
-/// since membership is checked before a memory file is written — is resolved
-/// through its nearest existing ancestor so it lands in the same form as the
-/// directory it is compared against.
-///
-/// Returns `false` if either path cannot be resolved.
+/// Delegates to the shared containment helper so memory membership, sub-agent
+/// write confinement, and every other "is this under that" question answer the
+/// same way on every platform. See [`agentrs_config::paths::is_within`] for
+/// what canonicalization buys and what it refuses.
 pub fn is_memory_path(path: &Path, memory_dir: &Path) -> bool {
-    let Ok(normalized_path) = normalize_path(path) else {
-        return false;
-    };
-    let Ok(normalized_dir) = normalize_path(memory_dir) else {
-        return false;
-    };
-    normalized_path.starts_with(&normalized_dir)
+    is_within(path, memory_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,68 +170,6 @@ pub fn is_default_memory_dir() -> bool {
 /// Check whether a path string contains `..` traversal segments.
 fn contains_traversal(path: &str) -> bool {
     path.split(['/', '\\']).any(|seg| seg == "..")
-}
-
-/// Lexical path normalization without filesystem access.
-///
-/// Collapses `.` and redundant separators. Does NOT resolve `..`
-/// (that's rejected before we get here) or symlinks.
-fn normalize_lexical(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {} // skip `.`
-            _ => result.push(component),
-        }
-    }
-    result
-}
-
-/// Normalize a path for comparison: try filesystem canonicalization first,
-/// fall back to lexical normalization if the path doesn't exist yet.
-///
-/// Returns `Err(())` when the path cannot be safely resolved — including
-/// when canonicalization fails AND the path contains `..` segments
-/// (lexical normalization cannot safely resolve parent references).
-fn normalize_path(path: &Path) -> std::result::Result<PathBuf, ()> {
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return Ok(canonical);
-    }
-    // Path doesn't exist on disk. Lexical normalization is only safe when
-    // there are no `..` segments — those require real filesystem state to
-    // resolve correctly (symlinks, mount points, etc.).
-    if contains_traversal(&path.to_string_lossy()) {
-        return Err(());
-    }
-    let normalized = normalize_lexical(path);
-    if normalized.as_os_str().is_empty() {
-        return Err(());
-    }
-    Ok(canonicalize_existing_ancestor(&normalized).unwrap_or(normalized))
-}
-
-/// Canonicalize the nearest ancestor of `path` that exists, then re-attach the
-/// missing tail.
-///
-/// A memory file is compared against its directory *before* it is written, so
-/// one side of that comparison always goes through `fs::canonicalize` and the
-/// other does not. On Windows canonicalization yields a verbatim `\\?\C:\...`
-/// prefix, and on macOS it resolves `/var` to `/private/var`; either way a
-/// purely lexical child stops looking like it lives under its own canonical
-/// parent. Resolving the existing ancestor puts both sides in the same form.
-fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut tail = Vec::new();
-    let mut cursor = path;
-    while let Some(parent) = cursor.parent() {
-        tail.push(cursor.file_name()?);
-        if let Ok(canonical) = fs::canonicalize(parent) {
-            let mut resolved = canonical;
-            resolved.extend(tail.iter().rev());
-            return Some(resolved);
-        }
-        cursor = parent;
-    }
-    None
 }
 
 /// Simple hash function for path truncation suffix.

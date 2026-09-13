@@ -301,6 +301,11 @@ enabled = true
 model = "claude-haiku-4-5-20251001"   # defaults to the session model
 limit = 5                             # files injected per turn
 timeout_ms = 3000
+
+[memory.extract]
+enabled = false                       # off by default; see below
+model = "claude-haiku-4-5-20251001"
+max_turns = 5
 ```
 
 ### Relevance Recall
@@ -353,6 +358,35 @@ first time the agent writes a memory — the taxonomy and examples are only
 needed for writing, not reading. The full set also tells the agent where to
 look for context that is neither in the conversation nor in memory: the memory
 directory first, then saved session records as a last resort.
+
+### Background Extraction
+
+With `[memory.extract] enabled = true`, the end of each turn forks a restricted
+sub-agent that reads what just happened and saves anything durable. The main
+agent no longer has to remember to save; it only has to be worth saving from.
+
+**This is off by default, and the reasons are worth reading before turning it
+on:**
+
+- **Cost.** Every turn that does not already write memory pays an extra
+  sub-agent run. Point `model` at a small model to keep it cheap.
+- **Privacy.** The conversation is handed to the extraction agent and anything
+  it judges durable is written to disk. If your sessions contain material you
+  would not want persisted, leave this off.
+
+What it cannot do is write outside the memory directory. The extraction agent
+gets `Read`, `Grep`, `Glob`, `Write`, and `Edit` and nothing else — no shell, no
+network, no spawning further agents — and `Write`/`Edit` calls landing outside
+the memory directory are refused before the tool runs. Reads are deliberately
+unconfined so it can check a claim against the code before recording it.
+
+Extraction is skipped entirely on turns where the main agent already wrote a
+memory: it had the full save instructions in its own prompt, so a second pass
+would duplicate its work at best and contradict it at worst. A pass still in
+flight when the session ends is waited on for five seconds, so a memory is not
+left half-written.
+
+Use `/memory` to audit what has accumulated.
 
 ### Reviewing What Is Stored
 

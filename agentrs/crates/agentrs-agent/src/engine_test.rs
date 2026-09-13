@@ -82,6 +82,8 @@ mod tests_set_config {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -621,6 +623,8 @@ mod tests_phase6 {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -924,6 +928,8 @@ mod tests_compact {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -1730,6 +1736,8 @@ mod tests_plan_mode {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -1968,6 +1976,8 @@ mod tests_handle_command {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -2468,6 +2478,8 @@ mod tests_loop_helpers {
     use agentrs_types::message::{ContentBlock, StopReason, TokenUsage};
     use serde_json::json;
 
+    use crate::tool_call::PolicyDenial;
+
     use super::{AgentError, build_assistant_content, merge_tool_results, tool_call_malformed_fingerprint};
     use crate::stream::StreamOutcome;
     use crate::tool_call::{
@@ -2556,7 +2568,7 @@ mod tests_loop_helpers {
     fn merge_interleaves_policy_denial_without_executing_it() {
         let calls = vec![tool_use("denied", "ExecCommand"), tool_use("ok", "Read")];
         let reasons = vec![None, None];
-        let denied = vec![Some("ExecCommand".to_string()), None];
+        let denied = vec![Some(PolicyDenial::Unavailable("ExecCommand".to_string())), None];
         let executed = vec![executed_result("ok")];
 
         let (results, mods) = merge_tool_results(&calls, &reasons, &denied, executed, vec![None]);
@@ -2574,6 +2586,31 @@ mod tests_loop_helpers {
             ContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "ok"
         ));
         assert!(mods.iter().all(Option::is_none));
+    }
+
+    // A confinement denial must send the model to a different path, not to a
+    // different tool, so the two denials cannot share a message.
+    #[test]
+    fn a_confinement_denial_names_the_directory_rather_than_the_tool() {
+        let calls = vec![tool_use("outside", "Write")];
+        let reasons = vec![None];
+        let denied = vec![Some(PolicyDenial::OutsideWriteRoot {
+            tool: "Write".to_string(),
+            write_root: std::path::PathBuf::from("/memory"),
+        })];
+
+        let (results, _) = merge_tool_results(&calls, &reasons, &denied, Vec::new(), Vec::new());
+
+        let ContentBlock::ToolResult { content, is_error, .. } = &results[0] else {
+            panic!("expected a tool result");
+        };
+        assert!(*is_error);
+        assert!(content.contains("may only write inside"));
+        assert!(content.contains("file_path"));
+        assert!(
+            !content.contains("not available"),
+            "the tool is available; the destination is not"
+        );
     }
 
     #[test]
@@ -3011,6 +3048,8 @@ mod tests_tool_policy_enforcement {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -3191,6 +3230,8 @@ mod tests_todo {
             memory_recall: Default::default(),
             surfaced_memories: Default::default(),
             recent_tools: Vec::new(),
+            memory_extractor: None,
+            extract_cursor: 0,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,

@@ -306,6 +306,7 @@ impl AgentSpawner {
             requested_tools,
             &definition.denied_tools,
             &self.parent_tools,
+            overrides.write_root.clone(),
         );
         config.system_prompt = match spec.system_prompt.clone().or(definition.system_prompt.clone()) {
             Some(mut prompt) => {
@@ -787,6 +788,7 @@ fn definition_policy(
     allowed: &[String],
     denied: &[String],
     parent_tools: &[Arc<dyn Tool>],
+    write_root: Option<PathBuf>,
 ) -> ToolPolicy {
     let mut candidates = parent_tools
         .iter()
@@ -795,11 +797,15 @@ fn definition_policy(
     candidates.extend(REBUILT_FOR_CHILD.iter().map(|name| (*name).to_string()));
     candidates.push("Spawn".to_string());
     candidates.push("ToolSearch".to_string());
-    ToolPolicy::allow_only(
-        candidates.into_iter().filter(|name| {
-            parent.allows(name) && (allowed.is_empty() || allowed.contains(name)) && !denied.contains(name)
-        }),
-    )
+    let granted = candidates
+        .into_iter()
+        .filter(|name| parent.allows(name) && (allowed.is_empty() || allowed.contains(name)) && !denied.contains(name));
+    // A child confinement is additional to whatever the parent already has;
+    // a parent root is inherited when the caller does not name a tighter one.
+    match write_root.or_else(|| parent.write_root().map(Path::to_path_buf)) {
+        Some(root) => ToolPolicy::allow_only_within(granted, root),
+        None => ToolPolicy::allow_only(granted),
+    }
 }
 
 fn build_task_tracking(

@@ -5,7 +5,9 @@ mod phase7_tests {
     use agentrs_config::config::{CliArgs, Config};
     use agentrs_types::message::TokenUsage;
 
-    use super::{ForkOverrides, SubAgentSpec, ToolPolicy, build_tool_registry, child_policy, usage_delta};
+    use super::{
+        ForkOverrides, SubAgentSpec, ToolPolicy, build_tool_registry, child_policy, definition_policy, usage_delta,
+    };
 
     fn test_config() -> Config {
         Config::resolve(&CliArgs {
@@ -33,6 +35,42 @@ mod phase7_tests {
         assert!(o.model.is_none());
         assert!(o.effort.is_none());
         assert!(o.allowed_tools.is_empty());
+        assert!(
+            o.write_root.is_none(),
+            "a child inherits the parent's filesystem reach unless confined explicitly"
+        );
+    }
+
+    // Confinement is what keeps a background extraction agent from persisting
+    // outside the memory directory.
+    #[test]
+    fn a_requested_write_root_confines_the_child() {
+        let parent = ToolPolicy::Unrestricted;
+        let root = std::path::PathBuf::from("/memory");
+
+        let child = definition_policy(&parent, &["Read".into(), "Write".into()], &[], &[], Some(root.clone()));
+
+        assert!(child.allows("Read"));
+        assert!(child.allows("Write"));
+        assert_eq!(child.write_root(), Some(root.as_path()));
+    }
+
+    // A child cannot widen its own reach by declining to name a root.
+    #[test]
+    fn a_parent_confinement_is_inherited_when_the_child_names_none() {
+        let root = std::path::PathBuf::from("/memory");
+        let parent = ToolPolicy::allow_only_within(["Read", "Write"], root.clone());
+
+        let child = definition_policy(&parent, &[], &[], &[], None);
+
+        assert_eq!(child.write_root(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn an_unconfined_parent_and_child_produce_an_unconfined_policy() {
+        let child = definition_policy(&ToolPolicy::Unrestricted, &["Read".into()], &[], &[], None);
+
+        assert!(child.write_root().is_none());
     }
 
     #[test]

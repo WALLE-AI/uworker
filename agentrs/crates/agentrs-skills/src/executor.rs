@@ -105,6 +105,8 @@ pub async fn execute_fork(
         model: skill.model.clone(),
         effort: skill.effort.map(effort_to_string),
         allowed_tools: skill.allowed_tools.clone(),
+        // A skill runs on the user's behalf, so it keeps the parent's reach.
+        write_root: None,
     };
 
     let result = spawner.spawn(sub_config, overrides, cancel).await;

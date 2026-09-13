@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,11 @@ pub struct ForkOverrides {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub allowed_tools: Vec<String>,
+    /// Confine the child's writes to this directory.
+    ///
+    /// For sub-agents that should read widely but persist narrowly. `None`
+    /// leaves the child under the same filesystem reach as its parent.
+    pub write_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -38,6 +38,7 @@ use tracing::info;
 use crate::context::{SystemPromptCache, build_system_prompt_with_shell_and_tool_policy};
 use crate::context_usage::PromptUsage;
 use crate::engine::AgentEngine;
+use crate::memory::extract::MemoryExtractor;
 use crate::memory::telemetry::log_memory_shape;
 use crate::output::OutputSink;
 use crate::plan::tools::{EnterPlanModeTool, ExitPlanModeTool};
@@ -107,6 +108,9 @@ struct AgentToolRuntime {
     registry: Arc<crate::subagent::registry::SubAgentRegistry>,
     parent_session: Arc<RwLock<Option<String>>>,
     team_inbox: Option<Arc<TeammateInbox>>,
+    /// Shared with the engine so background memory extraction can fork a
+    /// restricted child of this same runtime.
+    spawner: Arc<AgentSpawner>,
 }
 
 #[derive(Default)]
@@ -206,6 +210,7 @@ impl AgentBootstrap {
         let mcp_managers = mcp.managers;
         // Read before `into_engine` consumes the builder.
         let memory_recall = self.config.memory.recall.clone();
+        let memory_extract = self.config.memory.extract.clone();
         let mut engine = self.into_engine(
             provider.clone(),
             registry,
@@ -220,6 +225,15 @@ impl AgentBootstrap {
             environment.memory_dir_is_default,
             memory_recall,
         );
+        if let Some(directory) = environment.memory_dir.clone()
+            && memory_extract.enabled
+        {
+            engine.set_memory_extractor(Arc::new(MemoryExtractor::new(
+                Arc::clone(&subagent_registry.spawner),
+                directory,
+                memory_extract,
+            )));
+        }
         if let Some(inbox) = subagent_registry.team_inbox {
             engine.set_team_inbox(inbox);
         }
@@ -469,6 +483,7 @@ impl AgentBootstrap {
             registry: spawner.registry(),
             parent_session: spawner.parent_session_slot(),
             team_inbox: team_runtime.map(|runtime| runtime.leader_inbox()),
+            spawner,
         }
     }
 

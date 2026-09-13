@@ -1,3 +1,4 @@
+pub(crate) mod extract;
 pub(crate) mod permission;
 pub(crate) mod recall;
 pub(crate) mod telemetry;

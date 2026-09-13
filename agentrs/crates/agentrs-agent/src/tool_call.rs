@@ -1,4 +1,42 @@
+use std::path::PathBuf;
+
 use agentrs_types::{message::ContentBlock, skill_types::ContextModifier};
+
+/// Why the runtime policy rejected an otherwise well-formed tool call.
+///
+/// The two cases need different answers from the model. Telling it a tool is
+/// unavailable when the tool is fine but the path is not would send it hunting
+/// for a different tool instead of a different destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyDenial {
+    /// The tool itself is not authorized in this runtime.
+    Unavailable(String),
+    /// The tool is authorized, but the call writes outside the confinement.
+    OutsideWriteRoot { tool: String, write_root: PathBuf },
+}
+
+impl PolicyDenial {
+    /// Tool name, for logging.
+    pub(crate) fn tool(&self) -> &str {
+        match self {
+            Self::Unavailable(tool) => tool,
+            Self::OutsideWriteRoot { tool, .. } => tool,
+        }
+    }
+
+    /// The message handed back to the model as the tool result.
+    fn message(&self) -> String {
+        match self {
+            Self::Unavailable(tool) => {
+                format!("Tool '{tool}' is not available in this runtime. Use an available tool or answer in text.")
+            }
+            Self::OutsideWriteRoot { tool, write_root } => format!(
+                "Tool '{tool}' may only write inside {}. Re-issue the call with a file_path under that directory.",
+                write_root.display()
+            ),
+        }
+    }
+}
 
 pub(crate) const DEFAULT_MAX_TOOL_CALL_MALFORMED: usize = 3;
 pub(crate) const DEFAULT_MAX_TOOL_CALL_FAILURE: usize = 3;
@@ -162,14 +200,14 @@ pub(crate) fn tool_call_failure_fingerprint(tool_calls: &[ContentBlock]) -> Opti
 /// into the original `tool_calls` order.
 ///
 /// `tool_call_malformed_reasons[i]` is `Some` when call `i` was malformed (and gets a
-/// synthetic error result). `policy_denied_tool_names[i]` is `Some` when the
-/// runtime policy rejected an otherwise valid call. Remaining calls consume
+/// synthetic error result). `policy_denials[i]` is `Some` when the runtime
+/// policy rejected an otherwise valid call. Remaining calls consume
 /// the next result/modifier from the `executable_*` iterators. Kept as a free
 /// function so the interleaving invariant can be unit-tested in isolation.
 pub(crate) fn merge_tool_results(
     tool_calls: &[ContentBlock],
     tool_call_malformed_reasons: &[Option<ToolCallMalformedReason>],
-    policy_denied_tool_names: &[Option<String>],
+    policy_denials: &[Option<PolicyDenial>],
     executable_results: Vec<ContentBlock>,
     executable_modifiers: Vec<Option<ContextModifier>>,
 ) -> (Vec<ContentBlock>, Vec<Option<ContextModifier>>) {
@@ -178,11 +216,7 @@ pub(crate) fn merge_tool_results(
     let mut tool_results = Vec::with_capacity(tool_calls.len());
     let mut tool_modifiers = Vec::with_capacity(tool_calls.len());
 
-    for ((call, reason), denied_name) in tool_calls
-        .iter()
-        .zip(tool_call_malformed_reasons)
-        .zip(policy_denied_tool_names)
-    {
+    for ((call, reason), denial) in tool_calls.iter().zip(tool_call_malformed_reasons).zip(policy_denials) {
         if let Some(reason) = reason {
             let ContentBlock::ToolUse { id, name, .. } = call else {
                 continue;
@@ -205,7 +239,7 @@ pub(crate) fn merge_tool_results(
                 is_error: true,
             });
             tool_modifiers.push(None);
-        } else if let Some(denied_name) = denied_name {
+        } else if let Some(denial) = denial {
             let ContentBlock::ToolUse { id, .. } = call else {
                 continue;
             };
@@ -213,15 +247,13 @@ pub(crate) fn merge_tool_results(
                 target: "agentrs_agent",
                 event = "agent.tool_policy.denied",
                 tool_call_id = %id,
-                tool = %denied_name,
+                tool = %denial.tool(),
                 "rejected tool call by runtime policy"
             );
 
             tool_results.push(ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
-                content: format!(
-                    "Tool '{denied_name}' is not available in this runtime. Use an available tool or answer in text."
-                ),
+                content: denial.message(),
                 is_error: true,
             });
             tool_modifiers.push(None);
