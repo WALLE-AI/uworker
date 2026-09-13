@@ -8,7 +8,9 @@ use agentrs_config::shell::{ResolvedShell, resolve_shell_config};
 use agentrs_config::todo::TodoMode;
 use agentrs_mcp::manager::McpManager;
 use agentrs_mcp::tool_proxy::register_mcp_tools;
-use agentrs_memory::paths::{ENTRYPOINT_NAME, auto_memory_dir, auto_memory_dir_from_base, ensure_memory_dir};
+use agentrs_memory::paths::{
+    ENTRYPOINT_NAME, auto_memory_dir, auto_memory_dir_from_base, ensure_memory_dir, is_default_memory_dir,
+};
 use agentrs_providers::{LlmProvider, create_provider};
 use agentrs_skills::loader::load_all_skills;
 use agentrs_skills::permissions::SkillPermissionChecker;
@@ -36,6 +38,7 @@ use tracing::info;
 use crate::context::{SystemPromptCache, build_system_prompt_with_shell_and_tool_policy};
 use crate::context_usage::PromptUsage;
 use crate::engine::AgentEngine;
+use crate::memory::telemetry::log_memory_shape;
 use crate::output::OutputSink;
 use crate::plan::tools::{EnterPlanModeTool, ExitPlanModeTool};
 use crate::session::Session;
@@ -94,6 +97,10 @@ struct BootstrapEnvironment {
     // Prompt context.
     resolved_shell: ResolvedShell,
     memory_dir: Option<PathBuf>,
+    /// Whether `memory_dir` was resolved from the platform default. An
+    /// explicitly configured directory is an arbitrary user-chosen location,
+    /// so it does not get the approval carve-out.
+    memory_dir_is_default: bool,
 }
 
 struct AgentToolRuntime {
@@ -206,7 +213,7 @@ impl AgentBootstrap {
             prompt_usage,
         );
         engine.set_subagent_runtime(subagent_registry.registry, subagent_registry.parent_session);
-        engine.set_memory_runtime(environment.memory_dir.clone());
+        engine.set_memory_runtime(environment.memory_dir.clone(), environment.memory_dir_is_default);
         if let Some(inbox) = subagent_registry.team_inbox {
             engine.set_team_inbox(inbox);
         }
@@ -244,8 +251,10 @@ impl AgentBootstrap {
                 None
             }
         });
+        log_memory_shape(memory_dir.as_deref());
         Ok(BootstrapEnvironment {
             resolved_shell: resolve_shell_config(&self.config.shell)?,
+            memory_dir_is_default: self.config.memory.dir.is_none() && is_default_memory_dir(),
             memory_dir,
             workspace: workspace_path,
         })

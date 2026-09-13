@@ -77,11 +77,13 @@ pub fn memory_entrypoint(memory_dir: &Path) -> PathBuf {
 
 /// Check whether `path` belongs to the given memory directory.
 ///
-/// Both paths are canonicalized (via `dunce::canonicalize` fallback to
-/// `std::fs::canonicalize`) to prevent traversal bypasses through `..`
-/// segments or symlinks.
+/// Both sides are canonicalized to prevent traversal bypasses through `..`
+/// segments or symlinks. A path that does not exist yet — the common case,
+/// since membership is checked before a memory file is written — is resolved
+/// through its nearest existing ancestor so it lands in the same form as the
+/// directory it is compared against.
 ///
-/// Returns `false` if either path cannot be resolved (e.g. doesn't exist).
+/// Returns `false` if either path cannot be resolved.
 pub fn is_memory_path(path: &Path, memory_dir: &Path) -> bool {
     let Ok(normalized_path) = normalize_path(path) else {
         return false;
@@ -212,7 +214,31 @@ fn normalize_path(path: &Path) -> std::result::Result<PathBuf, ()> {
     if normalized.as_os_str().is_empty() {
         return Err(());
     }
-    Ok(normalized)
+    Ok(canonicalize_existing_ancestor(&normalized).unwrap_or(normalized))
+}
+
+/// Canonicalize the nearest ancestor of `path` that exists, then re-attach the
+/// missing tail.
+///
+/// A memory file is compared against its directory *before* it is written, so
+/// one side of that comparison always goes through `fs::canonicalize` and the
+/// other does not. On Windows canonicalization yields a verbatim `\\?\C:\...`
+/// prefix, and on macOS it resolves `/var` to `/private/var`; either way a
+/// purely lexical child stops looking like it lives under its own canonical
+/// parent. Resolving the existing ancestor puts both sides in the same form.
+fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        tail.push(cursor.file_name()?);
+        if let Ok(canonical) = fs::canonicalize(parent) {
+            let mut resolved = canonical;
+            resolved.extend(tail.iter().rev());
+            return Some(resolved);
+        }
+        cursor = parent;
+    }
+    None
 }
 
 /// Simple hash function for path truncation suffix.

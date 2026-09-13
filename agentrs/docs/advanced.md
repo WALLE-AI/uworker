@@ -289,12 +289,40 @@ Override the base directory via environment variable:
 export AGENTRS_MEMORY_DIR=/custom/path
 ```
 
+Or through config:
+
+```toml
+[memory]
+enabled = true
+dir = "/custom/path"   # same effect as AGENTRS_MEMORY_DIR
+```
+
+### Approvals
+
+Read, Write, and Edit calls that target a file inside the **default** memory
+directory are approved automatically — otherwise every memory the agent saves
+would interrupt you for a decision you already made by leaving memory enabled.
+
+The carve-out is deliberately narrow:
+
+- It applies only to the auto-resolved default directory. If you point memory
+  somewhere else with `AGENTRS_MEMORY_DIR` or `[memory] dir`, that path is an
+  arbitrary location you chose, so writes to it go through the normal approval
+  prompt.
+- It is scoped to paths, not tool names. Approving a memory write never adds
+  `Write` to the session allow list, and a shell command that happens to touch
+  the same file is still subject to approval.
+
 ### How It Works
 
 1. Agent starts → memory directory resolved from project path
 2. `MEMORY.md` index loaded into system prompt (truncated at 200 lines / 25 KB)
 3. Agent reads/writes memory files using standard Read/Write tools
 4. Agent maintains the `MEMORY.md` index as memories are added or removed
+
+Set `RUST_LOG=agentrs_memory=debug` to see how much memory a session loads
+(entry count, index size, staleness) and how often the agent reads it back.
+The logs record shape only — never filenames or memory content.
 
 ---
 

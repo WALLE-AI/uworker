@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::confirm::{ConfirmResult, ToolConfirmer};
+use crate::memory::permission::is_memory_carve_out;
 use agentrs_config::compact::CompactConfig;
 use agentrs_config::hooks::HookEngine;
 use agentrs_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
@@ -333,6 +335,9 @@ pub async fn execute_tool_calls_with_approval(
         msg_id,
         auto_approve,
         allow_list,
+        // No memory directory is in scope here, so every call goes through the
+        // normal approval flow.
+        None,
         hooks,
         compaction_level,
         toon_enabled,
@@ -351,6 +356,7 @@ pub(crate) async fn execute_tool_calls_with_approval_and_output_limit(
     msg_id: &str,
     auto_approve: bool,
     allow_list: &[String],
+    memory_dir: Option<&Path>,
     mut hooks: Option<&mut HookEngine>,
     compaction_level: agentrs_compact::CompactLevel,
     toon_enabled: bool,
@@ -373,7 +379,8 @@ pub(crate) async fn execute_tool_calls_with_approval_and_output_limit(
         // Check if approval is needed
         let needs_approval = !auto_approve
             && !allow_list.contains(&name.to_string())
-            && !approval_manager.is_auto_approved(&category.to_string());
+            && !approval_manager.is_auto_approved(&category.to_string())
+            && !is_memory_carve_out(name, input, memory_dir);
 
         if needs_approval {
             // Emit tool_request and wait for approval

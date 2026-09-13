@@ -144,5 +144,6 @@ pub fn bedrock_config() -> Config {
         web: agentrs_config::web::WebConfig::default(),
         subagent: Default::default(),
         team: Default::default(),
+        memory: Default::default(),
     }
 }

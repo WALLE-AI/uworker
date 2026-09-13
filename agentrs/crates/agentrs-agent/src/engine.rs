@@ -16,7 +16,8 @@ use crate::context_usage::{
     estimate_tool_definitions_tokens,
 };
 use crate::error::AgentError;
-use crate::memory::watch::{observe_memory_writes, record_memory_reads};
+use crate::memory::telemetry::record_memory_reads;
+use crate::memory::watch::observe_memory_writes;
 use crate::orchestration::{
     ExecutionControl, execute_tool_calls_with_approval_and_output_limit, execute_tool_calls_with_output_limit,
 };
@@ -146,6 +147,10 @@ pub struct AgentEngine {
 
     // Long-term memory prompt state.
     memory_dir: Option<PathBuf>,
+    /// Same directory as `memory_dir`, but only when it was resolved from the
+    /// platform default — that is the one case where memory reads and writes
+    /// skip approval.
+    memory_approval_dir: Option<PathBuf>,
     memory_prompt: Option<String>,
     memory_full_instructions: bool,
     memory_written_this_turn: bool,
@@ -270,6 +275,7 @@ impl AgentEngine {
             session_manager,
             current_session: None,
             memory_dir: None,
+            memory_approval_dir: None,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -384,6 +390,7 @@ impl AgentEngine {
             session_manager,
             current_session: Some(session),
             memory_dir: None,
+            memory_approval_dir: None,
             memory_prompt: None,
             memory_full_instructions: false,
             memory_written_this_turn: false,
@@ -445,8 +452,20 @@ impl AgentEngine {
         self.prompt_usage = prompt_usage;
     }
 
-    pub(crate) fn set_memory_runtime(&mut self, memory_dir: Option<PathBuf>) {
+    /// Install the session's memory directory.
+    ///
+    /// `approval_carve_out` says whether that directory earned the permission
+    /// carve-out; the caller decides, because only it knows whether the path
+    /// was defaulted or supplied by the user.
+    pub(crate) fn set_memory_runtime(&mut self, memory_dir: Option<PathBuf>, approval_carve_out: bool) {
         self.memory_prompt = memory_dir.as_deref().map(build_memory_prompt_minimal);
+        self.memory_approval_dir = if approval_carve_out { memory_dir.clone() } else { None };
+        // The terminal path decides through the confirmer and the host path
+        // decides inline, so both need the carve-out directory.
+        self.confirmer
+            .lock()
+            .unwrap()
+            .set_memory_dir(self.memory_approval_dir.clone());
         self.memory_dir = memory_dir;
     }
 
@@ -917,6 +936,7 @@ impl AgentEngine {
                 &self.msg_id,
                 auto_approve,
                 &self.allow_list,
+                self.memory_approval_dir.as_deref(),
                 self.hooks.as_mut(),
                 self.compact_level,
                 self.toon_enabled,

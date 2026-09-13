@@ -204,6 +204,30 @@ fn tc_2_8_is_memory_path_inside() {
     );
 }
 
+// Membership is checked before the model's Write lands, so the target file
+// normally does not exist yet. Canonicalizing only the directory side used to
+// make those paths look external.
+#[test]
+fn is_memory_path_accepts_a_file_that_has_not_been_written_yet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mem_dir = tmp.path().join("memory");
+    fs::create_dir_all(&mem_dir).unwrap();
+    let unwritten = mem_dir.join("user_role.md");
+
+    assert!(
+        paths::is_memory_path(&unwritten, &mem_dir),
+        "a memory file must be recognized before it exists"
+    );
+    assert!(
+        paths::is_memory_path(&mem_dir.join("nested").join("deep.md"), &mem_dir),
+        "an unwritten file under an unwritten subdirectory must be recognized too"
+    );
+    assert!(
+        !paths::is_memory_path(&tmp.path().join("elsewhere.md"), &mem_dir),
+        "a sibling that does not exist yet must still be rejected"
+    );
+}
+
 // -- TC-2.9: Path membership negative -----------------------------------------
 
 #[test]
@@ -285,6 +309,49 @@ fn sanitize_different_paths_produce_different_results() {
 #[test]
 fn entrypoint_name_constant_is_memory_md() {
     assert_eq!(paths::ENTRYPOINT_NAME, "MEMORY.md");
+}
+
+// -- Default-vs-override classification ---------------------------------------
+//
+// The approval carve-out only applies to the platform default directory, so
+// this predicate decides whether memory writes can skip the permission prompt.
+
+#[test]
+#[serial(env)]
+fn an_unset_env_var_means_the_directory_is_the_platform_default() {
+    let saved = std::env::var(env_key()).ok();
+    // SAFETY: #[serial(env)] ensures no concurrent env mutation.
+    unsafe { std::env::remove_var(env_key()) };
+
+    assert!(paths::is_default_memory_dir());
+
+    restore_env(saved);
+}
+
+#[test]
+#[serial(env)]
+fn an_env_override_marks_the_directory_as_caller_chosen() {
+    let saved = std::env::var(env_key()).ok();
+    // SAFETY: #[serial(env)] ensures no concurrent env mutation.
+    unsafe { std::env::set_var(env_key(), "/custom/memory/path") };
+
+    assert!(!paths::is_default_memory_dir());
+
+    restore_env(saved);
+}
+
+#[test]
+#[serial(env)]
+fn an_empty_env_override_falls_back_to_the_default() {
+    let saved = std::env::var(env_key()).ok();
+    // An empty value is ignored by `memory_base_dir`, so the resolved directory
+    // is still the default one and must be classified as such.
+    // SAFETY: #[serial(env)] ensures no concurrent env mutation.
+    unsafe { std::env::set_var(env_key(), "") };
+
+    assert!(paths::is_default_memory_dir());
+
+    restore_env(saved);
 }
 
 // -- Helpers ------------------------------------------------------------------

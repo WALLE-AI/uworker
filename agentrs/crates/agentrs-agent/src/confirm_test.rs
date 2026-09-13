@@ -150,6 +150,31 @@ mod tests {
         assert!(!confirmer.is_allowed("WebFetch", &fetch("not a url")));
     }
 
+    // --- Memory directory carve-out (AC5-1, AC5-3) ---
+
+    // Memory reads and writes must not interrupt the user, so they are approved
+    // without consulting the allow list or stdin.
+    #[test]
+    fn memory_directory_calls_are_approved_without_an_allow_list_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = temp.path().join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        let mut confirmer = ToolConfirmer::new(false, vec![]);
+        confirmer.set_memory_dir(Some(memory.clone()));
+
+        let input = serde_json::json!({ "file_path": memory.join("user_role.md") });
+        assert_eq!(
+            confirmer.check("Write", &input, "user_role.md"),
+            ConfirmResult::Approved
+        );
+        assert_eq!(confirmer.check("Read", &input, "user_role.md"), ConfirmResult::Approved);
+        assert_eq!(confirmer.check("Edit", &input, "user_role.md"), ConfirmResult::Approved);
+
+        // The carve-out must not leak into the persistent allow list — it is
+        // scoped to paths, not to tool names.
+        assert!(!confirmer.allow_list.contains("Write"));
+    }
+
     #[test]
     fn domain_rules_are_case_insensitive_and_tolerate_a_leading_dot() {
         let confirmer = ToolConfirmer::new(false, vec!["WebFetch:domain:.Example.COM".into()]);

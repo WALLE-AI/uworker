@@ -1,11 +1,17 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use serde_json::Value;
+
+use crate::memory::permission::is_memory_carve_out;
 
 pub struct ToolConfirmer {
     auto_approve: bool,
     allow_list: HashSet<String>,
+    /// Memory directory whose reads and writes bypass approval. `None` when
+    /// memory is disabled or the directory came from an explicit override.
+    memory_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +26,15 @@ impl ToolConfirmer {
         Self {
             auto_approve,
             allow_list: allow_list.into_iter().collect(),
+            memory_dir: None,
         }
+    }
+
+    /// Grant the memory-directory carve-out for this session.
+    ///
+    /// Pass `None` to keep every call on the normal approval path.
+    pub(crate) fn set_memory_dir(&mut self, memory_dir: Option<PathBuf>) {
+        self.memory_dir = memory_dir;
     }
 
     /// Returns whether auto-approve is enabled
@@ -61,7 +75,10 @@ impl ToolConfirmer {
 
     /// Check if the tool needs confirmation. Returns the user's decision.
     pub fn check(&mut self, tool_name: &str, input: &Value, tool_input_display: &str) -> ConfirmResult {
-        if self.auto_approve || self.is_allowed(tool_name, input) {
+        if self.auto_approve
+            || self.is_allowed(tool_name, input)
+            || is_memory_carve_out(tool_name, input, self.memory_dir.as_deref())
+        {
             return ConfirmResult::Approved;
         }
 
