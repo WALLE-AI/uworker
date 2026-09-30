@@ -55,6 +55,19 @@ impl TeammateInbox {
         }
     }
 
+    /// Messages waiting to be drained. Reported by `/teams` so a stalled
+    /// member is distinguishable from an idle one.
+    pub(crate) fn depth(&self) -> usize {
+        self.messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.notify.notify_waiters();

@@ -56,6 +56,7 @@ impl SubAgentHandle {
             name: self.name.clone(),
             status,
             started_at: self.started_at,
+            persistent: self.persistent,
         }
     }
 

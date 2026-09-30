@@ -1,5 +1,5 @@
 use agentrs_agent::commands::CommandSpec;
-use agentrs_protocol::events::TodoSnapshot;
+use agentrs_protocol::events::{SubAgentEventStatus, TodoSnapshot};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
@@ -1539,4 +1539,100 @@ fn the_panel_never_crowds_out_the_composer() {
 
     assert!(rendered.contains("Type a message"), "composer gone:\n{rendered}");
     assert!(rendered.contains("AgentrsCLI ·"), "footer gone:\n{rendered}");
+}
+
+/// Render a state carrying the given sub-agents, each started and then
+/// reported once so its row has numbers in it.
+fn render_with_agents(count: usize, finished: usize, size: (u16, u16)) -> String {
+    let mut state = AppState::new(
+        "model".to_string(),
+        "provider".to_string(),
+        "/workspace".to_string(),
+        true,
+    );
+    state.show_welcome = false;
+    for index in 0..count {
+        let id = format!("child-{index}");
+        state.handle_agent_event(AgentEvent::SubAgentStarted {
+            id: id.clone(),
+            name: format!("worker-{index}"),
+            depth: 1,
+        });
+        if index < finished {
+            state.handle_agent_event(AgentEvent::SubAgentFinished {
+                id,
+                status: SubAgentEventStatus::Finished,
+                turns: 2,
+                output_tokens: 10,
+            });
+        } else {
+            state.handle_agent_event(AgentEvent::SubAgentProgress {
+                id,
+                status: SubAgentEventStatus::Running,
+                turns: 1,
+                output_tokens: 7,
+            });
+        }
+    }
+
+    let backend = TestBackend::new(size.0, size.1);
+    let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+    terminal
+        .draw(|frame| render(frame, &state))
+        .expect("render should succeed");
+    terminal.backend().to_string()
+}
+
+#[test]
+fn consecutive_agents_collapse_under_one_header() {
+    let rendered = render_with_agents(2, 0, (80, 20));
+
+    assert!(rendered.contains("• Agents"), "got:\n{rendered}");
+    assert!(rendered.contains("├─ worker-0 (depth 1)"), "got:\n{rendered}");
+    assert!(rendered.contains("└─ worker-1 (depth 1)"), "got:\n{rendered}");
+    assert!(rendered.contains("running · 1 turns · 7 out"), "got:\n{rendered}");
+    assert!(!rendered.contains("• Tools"), "agents are not tools:\n{rendered}");
+}
+
+#[test]
+fn a_single_agent_renders_its_own_header_and_body() {
+    let rendered = render_with_agents(1, 0, (80, 20));
+
+    assert!(rendered.contains("• worker-0 (depth 1)"), "got:\n{rendered}");
+    assert!(!rendered.contains("• Agents"), "one agent needs no group:\n{rendered}");
+}
+
+#[test]
+fn the_agent_panel_counts_the_live_agents_against_the_total() {
+    let rendered = render_with_agents(3, 1, (80, 24));
+
+    assert!(rendered.contains("Agents 2/3"), "got:\n{rendered}");
+    assert!(rendered.contains("▸ worker-1"), "got:\n{rendered}");
+    assert!(rendered.contains("▸ worker-2"), "got:\n{rendered}");
+}
+
+#[test]
+fn no_live_agent_means_no_panel_and_no_wasted_row() {
+    let rendered = render_with_agents(2, 2, (80, 24));
+    // The transcript still keeps its `• Agents` block; only the live panel,
+    // whose header carries the count, is gone.
+    assert!(!rendered.contains("Agents 0/"), "got:\n{rendered}");
+    assert!(!rendered.contains("Agents 2/2"), "got:\n{rendered}");
+    assert!(!rendered.contains("▸ worker-"), "got:\n{rendered}");
+}
+
+#[test]
+fn a_wide_fan_out_elides_the_tail_rather_than_crowding_the_transcript() {
+    let rendered = render_with_agents(7, 0, (80, 24));
+
+    assert!(rendered.contains("Agents 7/7"), "got:\n{rendered}");
+    assert!(rendered.contains("… 3 more"), "got:\n{rendered}");
+    // The transcript block has its own, wider cap, so the head is elided there.
+    assert!(rendered.contains("earlier agents"), "got:\n{rendered}");
+}
+
+#[test]
+fn the_agent_panel_never_displaces_the_composer() {
+    let rendered = render_with_agents(7, 0, (60, 12));
+    assert!(rendered.contains("Type a message…"), "got:\n{rendered}");
 }

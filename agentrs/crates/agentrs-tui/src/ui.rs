@@ -5,17 +5,20 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agent_panel::{agents_panel_height, render_agents_panel};
 use crate::markdown::{MarkdownTheme, render_markdown};
 use crate::state::{AppState, ApprovalChoice};
+use crate::todo_panel::{render_todo_panel, todo_panel_height};
 use crate::transcript::{EntryKind, ToolStepStatus, TranscriptEntry};
 
 const MAX_COMPOSER_HEIGHT: u16 = 8;
 const MAX_POPUP_ITEMS: usize = 7;
 const FOOTER_HEIGHT: u16 = 2;
 const MAX_VISIBLE_TOOLS: usize = 3;
-/// Checklist rows the panel shows before it elides the tail. Sized so a long
-/// plan cannot crowd out the transcript it is describing.
-const MAX_VISIBLE_TODOS: usize = 6;
+/// Agent rows a collapsed `• Agents` block shows before it elides the head.
+/// Higher than the tool cap: a fan-out is usually read as a whole, and there
+/// are far fewer agents in a turn than tool calls.
+const MAX_VISIBLE_AGENT_STEPS: usize = 5;
 const TRANSCRIPT_BOTTOM_GAP: u16 = 1;
 const AGENTRS_MARK_WIDTH: usize = 24;
 /// Upper bound for the approval dialog height. Tool inputs are often
@@ -74,14 +77,24 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &AppState) {
         .visual_height(composer_width, MAX_COMPOSER_HEIGHT)
         .saturating_add(1);
     let chrome_height = composer_height.saturating_add(1).saturating_add(FOOTER_HEIGHT);
-    let todo_height = todo_panel_height(state, content.height.saturating_sub(chrome_height));
-    let reserved_height = chrome_height.saturating_add(todo_height);
+    // The agent panel is served before the checklist: a live agent is work in
+    // flight, while the checklist is work already described in the transcript.
+    let agents_height = agents_panel_height(state, content.height.saturating_sub(chrome_height));
+    let todo_height = todo_panel_height(
+        state,
+        content
+            .height
+            .saturating_sub(chrome_height)
+            .saturating_sub(agents_height),
+    );
+    let reserved_height = chrome_height.saturating_add(agents_height).saturating_add(todo_height);
     let max_transcript_height = content.height.saturating_sub(reserved_height);
     let transcript_height = desired_transcript_height(state, content.width, max_transcript_height);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(transcript_height),
+            Constraint::Length(agents_height),
             Constraint::Length(todo_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
@@ -91,86 +104,16 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &AppState) {
         .split(content);
 
     render_transcript(frame, chunks[0], state);
-    render_todo_panel(frame, chunks[1], state);
-    render_composer(frame, chunks[2], state);
-    render_footer(frame, chunks[4], state);
+    render_agents_panel(frame, chunks[1], state);
+    render_todo_panel(frame, chunks[2], state);
+    render_composer(frame, chunks[3], state);
+    render_footer(frame, chunks[5], state);
 
     if state.approval.is_some() {
         render_approval(frame, content, state);
     } else if state.popup.is_visible(&state.composer.text()) {
-        render_command_popup(frame, content, chunks[2], state);
+        render_command_popup(frame, content, chunks[3], state);
     }
-}
-
-/// Rows the checklist panel takes: a header plus one row per shown entry and,
-/// when entries are hidden, one more for the count of them. Zero without a
-/// checklist.
-///
-/// Capped at `available`. The frame is an inline viewport a dozen-odd rows
-/// tall, not the whole terminal, so a panel that asked for more than the
-/// chrome left behind would be silently shaved by the layout solver — and the
-/// row it loses is the last one, which is exactly the "N more" line.
-fn todo_panel_height(state: &AppState, available: u16) -> u16 {
-    if state.todos.is_empty() {
-        return 0;
-    }
-    let shown = state.todos.len().min(MAX_VISIBLE_TODOS);
-    let elided = usize::from(state.todos.len() > MAX_VISIBLE_TODOS);
-    // header + entries + optional "N more" line
-    let wanted = (1 + shown + elided).min(u16::MAX as usize) as u16;
-    wanted.min(available)
-}
-
-fn render_todo_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    if state.todos.is_empty() || area.height == 0 {
-        return;
-    }
-
-    let done = state.todos.iter().filter(|todo| todo.status == "completed").count();
-    let mut lines = vec![Line::from(Span::styled(
-        format!("  Tasks {}/{}", done, state.todos.len()),
-        muted(state),
-    ))];
-
-    // Fit the rows actually granted, not the rows requested. When the two
-    // differ, the count of hidden entries is the line that must survive: it is
-    // the only thing telling the reader the list goes on.
-    let body = area.height.saturating_sub(1) as usize;
-    let shown = if state.todos.len() <= body.min(MAX_VISIBLE_TODOS) {
-        state.todos.len()
-    } else {
-        // One body row goes to the "N more" line, so the entries get the rest.
-        body.saturating_sub(1).min(MAX_VISIBLE_TODOS)
-    };
-
-    for todo in state.todos.iter().take(shown) {
-        let (marker, style) = match todo.status.as_str() {
-            "completed" => ("✓", muted(state)),
-            "in_progress" => ("▸", color(state, Color::Cyan)),
-            _ => ("○", normal(state)),
-        };
-        // The active entry is the one the user is waiting on, so it shows its
-        // present-continuous form; the rest stay in the imperative they were
-        // planned in.
-        let label = if todo.status == "in_progress" {
-            todo.active_form.as_deref().unwrap_or(&todo.content)
-        } else {
-            &todo.content
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {marker} "), style),
-            Span::styled(label.to_string(), style),
-        ]));
-    }
-
-    if state.todos.len() > shown {
-        lines.push(Line::from(Span::styled(
-            format!("  … {} more", state.todos.len() - shown),
-            muted(state),
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn compact_cwd(cwd: &str) -> &str {
@@ -307,11 +250,19 @@ fn transcript_lines(entries: &[TranscriptEntry], width: u16, state: &AppState) -
             lines.push(Line::default());
         }
         let entry = &entries[index];
-        let tool_group_end = consecutive_tool_end(entries, index);
-        if tool_group_end.saturating_sub(index) > 1 {
-            lines.extend(tool_group_lines(&entries[index..tool_group_end], width, state));
-            index = tool_group_end;
-            continue;
+        if let Some(header) = group_header(entry.kind) {
+            let group_end = consecutive_kind_end(entries, index);
+            if group_end.saturating_sub(index) > 1 {
+                lines.extend(step_group_lines(
+                    header,
+                    &entries[index..group_end],
+                    max_visible_group_rows(entry.kind),
+                    width,
+                    state,
+                ));
+                index = group_end;
+                continue;
+            }
         }
         match entry.kind {
             EntryKind::User => {
@@ -549,25 +500,57 @@ fn agentrs_mark_lines(state: &AppState) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn consecutive_tool_end(entries: &[TranscriptEntry], start: usize) -> usize {
-    if entries.get(start).is_none_or(|entry| entry.kind != EntryKind::Tool) {
-        return start.saturating_add(1).min(entries.len());
+/// Header for the kinds that collapse a consecutive run into one block, or
+/// `None` for kinds rendered one entry at a time.
+fn group_header(kind: EntryKind) -> Option<&'static str> {
+    match kind {
+        EntryKind::Tool => Some("• Tools"),
+        EntryKind::Agent => Some("• Agents"),
+        _ => None,
     }
+}
+
+fn max_visible_group_rows(kind: EntryKind) -> usize {
+    match kind {
+        EntryKind::Agent => MAX_VISIBLE_AGENT_STEPS,
+        _ => MAX_VISIBLE_TOOLS,
+    }
+}
+
+fn consecutive_kind_end(entries: &[TranscriptEntry], start: usize) -> usize {
+    let Some(kind) = entries.get(start).map(|entry| entry.kind) else {
+        return start.saturating_add(1).min(entries.len());
+    };
     entries[start..]
         .iter()
-        .position(|entry| entry.kind != EntryKind::Tool)
+        .position(|entry| entry.kind != kind)
         .map_or(entries.len(), |offset| start + offset)
 }
 
-fn tool_group_lines(entries: &[TranscriptEntry], width: u16, state: &AppState) -> Vec<Line<'static>> {
+/// Render a run of same-kind step entries as one block with a tree of rows.
+///
+/// Tools and agents share the shape: a header, an elision count for the rows
+/// that did not fit, then one branch row each with a one-line detail under it.
+fn step_group_lines(
+    header: &str,
+    entries: &[TranscriptEntry],
+    max_visible: usize,
+    width: u16,
+    state: &AppState,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
-        "• Tools",
+        header.to_string(),
         muted(state).add_modifier(Modifier::BOLD),
     ))];
-    let hidden = entries.len().saturating_sub(MAX_VISIBLE_TOOLS);
+    let hidden = entries.len().saturating_sub(max_visible);
     if hidden > 0 {
+        let noun = if entries.first().is_some_and(|entry| entry.kind == EntryKind::Agent) {
+            "earlier agents"
+        } else {
+            "earlier tools"
+        };
         lines.push(Line::from(Span::styled(
-            truncate_line(&format!("  … {hidden} earlier tools"), width),
+            truncate_line(&format!("  … {hidden} {noun}"), width),
             muted(state),
         )));
     }
@@ -575,8 +558,15 @@ fn tool_group_lines(entries: &[TranscriptEntry], width: u16, state: &AppState) -
     for (index, entry) in visible.iter().enumerate() {
         let last = index + 1 == visible.len();
         let branch = if last { "└─" } else { "├─" };
-        let status = entry.tool_status.unwrap_or(ToolStepStatus::Queued).label();
-        let label = truncate_line(&format!("  {branch} {}  {status}", entry.label), width);
+        let label = match entry.kind {
+            // An agent's status lives in its own body line, so the branch row
+            // carries the name alone.
+            EntryKind::Agent => truncate_line(&format!("  {branch} {}", entry.label), width),
+            _ => {
+                let status = entry.tool_status.unwrap_or(ToolStepStatus::Queued).label();
+                truncate_line(&format!("  {branch} {}  {status}", entry.label), width)
+            }
+        };
         lines.push(Line::from(Span::styled(label, entry_label_style(entry, state))));
         let indent = if last { "     " } else { "  │  " };
         if let Some(preview) = tool_preview_with_indent(&entry.text, width, indent) {
@@ -814,7 +804,7 @@ fn tool_preview_with_indent(text: &str, width: u16, indent: &str) -> Option<Stri
     Some(format!("{indent}{preview}"))
 }
 
-fn truncate_line(text: &str, width: u16) -> String {
+pub(super) fn truncate_line(text: &str, width: u16) -> String {
     let width = usize::from(width);
     if UnicodeWidthStr::width(text) <= width {
         return text.to_string();
@@ -1082,7 +1072,7 @@ fn entry_style(kind: EntryKind, state: &AppState) -> Style {
         EntryKind::User => Style::default().add_modifier(Modifier::REVERSED),
         EntryKind::Assistant => normal(state),
         EntryKind::Thinking => muted(state).add_modifier(Modifier::ITALIC),
-        EntryKind::Tool => muted(state),
+        EntryKind::Tool | EntryKind::Agent => muted(state),
         EntryKind::Info => muted(state),
         EntryKind::Error => error(state),
     }
@@ -1118,6 +1108,9 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             let status = entry.tool_status.unwrap_or(ToolStepStatus::Queued).label();
             format!("• {}  {status}", entry.label)
         }
+        // The agent's status is already in its body line; repeating it in the
+        // header would spend a second column saying the same thing.
+        EntryKind::Agent => format!("• {}", entry.label),
         _ => entry.label.clone(),
     }
 }
@@ -1125,14 +1118,14 @@ fn entry_label(entry: &TranscriptEntry) -> String {
 fn entry_label_style(entry: &TranscriptEntry, state: &AppState) -> Style {
     match entry.kind {
         EntryKind::Thinking => muted(state).add_modifier(Modifier::BOLD),
-        EntryKind::Tool => {
+        EntryKind::Tool | EntryKind::Agent => {
             tool_status_style(entry.tool_status.unwrap_or(ToolStepStatus::Queued), state).add_modifier(Modifier::BOLD)
         }
         _ => entry_style(entry.kind, state).add_modifier(Modifier::BOLD),
     }
 }
 
-fn tool_status_style(status: ToolStepStatus, state: &AppState) -> Style {
+pub(super) fn tool_status_style(status: ToolStepStatus, state: &AppState) -> Style {
     if state.no_color {
         return Style::default();
     }
@@ -1149,7 +1142,7 @@ fn tool_status_style(status: ToolStepStatus, state: &AppState) -> Style {
     Style::default().fg(color)
 }
 
-fn normal(_state: &AppState) -> Style {
+pub(super) fn normal(_state: &AppState) -> Style {
     Style::default()
 }
 
@@ -1161,7 +1154,7 @@ fn error(state: &AppState) -> Style {
     color(state, Color::Red).add_modifier(Modifier::BOLD)
 }
 
-fn muted(state: &AppState) -> Style {
+pub(super) fn muted(state: &AppState) -> Style {
     color(state, Color::DarkGray)
 }
 
@@ -1173,7 +1166,7 @@ fn divider(state: &AppState) -> Style {
     color(state, Color::DarkGray)
 }
 
-fn color(state: &AppState, color: Color) -> Style {
+pub(super) fn color(state: &AppState, color: Color) -> Style {
     if state.no_color {
         Style::default()
     } else {

@@ -33,7 +33,12 @@ mod tests {
         let registry = default_registry();
         let mut names: Vec<&str> = registry.all().iter().map(|command| command.name()).collect();
         names.sort_unstable();
-        assert_eq!(names, ["clear", "compact", "context", "help", "memory", "quit"]);
+        assert_eq!(
+            names,
+            [
+                "agents", "clear", "compact", "context", "help", "memory", "quit", "teams"
+            ]
+        );
     }
 
     #[test]

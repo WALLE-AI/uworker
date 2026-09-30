@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use agentrs_agent::output::OutputSink;
-use agentrs_protocol::events::{ProtocolEvent, SubAgentEventStatus, TodoSnapshot, ToolStatus, Usage};
+use agentrs_protocol::events::{ProtocolEvent, SubAgentEventStatus, TeamEvent, TodoSnapshot, ToolStatus, Usage};
 use agentrs_protocol::writer::ProtocolEmitter;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -62,6 +62,20 @@ pub(super) enum AgentEvent {
         status: SubAgentEventStatus,
         turns: usize,
         output_tokens: u64,
+    },
+    TeamMemberJoined {
+        team: String,
+        member: String,
+        agent_id: String,
+    },
+    TeamMemberExited {
+        agent_id: String,
+    },
+    /// Routing only, as the protocol event carries: no message body reaches the
+    /// renderer, so a broadcast shows as `to = *`.
+    TeamMessageSent {
+        from: String,
+        to: String,
     },
 }
 
@@ -155,6 +169,25 @@ impl OutputSink for TuiSink {
             status,
             turns,
             output_tokens: usage.output_tokens,
+        });
+    }
+
+    /// Team activity reaches the TUI through the sink only. `ProtocolSink` is
+    /// not in the interactive path, so `TuiProtocolEmitter` deliberately leaves
+    /// `ProtocolEvent::TeamEvent` alone rather than mapping it a second time.
+    fn emit_team_event(&self, event: TeamEvent) {
+        self.send(match event {
+            TeamEvent::MemberJoined {
+                team_name,
+                member_name,
+                agent_id,
+            } => AgentEvent::TeamMemberJoined {
+                team: team_name,
+                member: member_name,
+                agent_id,
+            },
+            TeamEvent::MemberExited { agent_id, .. } => AgentEvent::TeamMemberExited { agent_id },
+            TeamEvent::MessageSent { from, to, .. } => AgentEvent::TeamMessageSent { from, to },
         });
     }
 }

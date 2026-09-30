@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use agentrs_agent::commands::CommandSpec;
-use agentrs_protocol::events::TodoSnapshot;
+use agentrs_protocol::events::{SubAgentEventStatus, TodoSnapshot};
 use agentrs_types::message::{Message, TokenUsage};
 
 use crate::app_command::application_command_specs;
@@ -37,6 +37,80 @@ impl ApprovalChoice {
     }
 }
 
+/// Where an agent row came from, which decides what its line can report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentOrigin {
+    /// Spawned for one task and gone when it returns.
+    OneShot,
+    /// Persistent team member, so it also carries message counters.
+    TeamMember,
+}
+
+/// One sub-agent or team member as the renderer sees it.
+///
+/// Lifecycle events update the row in place instead of appending a line each:
+/// a handful of concurrent agents would otherwise bury the conversation they
+/// were spawned from.
+#[derive(Debug)]
+pub(super) struct AgentRow {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) origin: AgentOrigin,
+    pub(super) status: SubAgentEventStatus,
+    pub(super) turns: usize,
+    pub(super) output_tokens: u64,
+    pub(super) messages_sent: usize,
+    pub(super) messages_received: usize,
+    /// Index of this row's transcript entry.
+    entry: usize,
+}
+
+impl AgentRow {
+    pub(super) fn is_active(&self) -> bool {
+        !matches!(
+            self.status,
+            SubAgentEventStatus::Finished | SubAgentEventStatus::Failed | SubAgentEventStatus::Cancelled
+        )
+    }
+
+    pub(super) fn status_label(&self) -> &'static str {
+        match self.status {
+            SubAgentEventStatus::Pending => "pending",
+            SubAgentEventStatus::Running => "running",
+            SubAgentEventStatus::Idle => "idle",
+            SubAgentEventStatus::Finished => "done",
+            SubAgentEventStatus::Failed => "failed",
+            SubAgentEventStatus::Cancelled => "cancelled",
+        }
+    }
+
+    /// Status as the renderer's shared step vocabulary, which is what colours
+    /// the row. `Idle` reads as queued: a parked teammate is waiting, not working.
+    pub(super) fn step_status(&self) -> ToolStepStatus {
+        match self.status {
+            SubAgentEventStatus::Pending | SubAgentEventStatus::Idle => ToolStepStatus::Queued,
+            SubAgentEventStatus::Running => ToolStepStatus::Running,
+            SubAgentEventStatus::Finished => ToolStepStatus::Success,
+            SubAgentEventStatus::Failed => ToolStepStatus::Error,
+            SubAgentEventStatus::Cancelled => ToolStepStatus::Cancelled,
+        }
+    }
+
+    /// The row's detail line: work done, plus message traffic for a teammate.
+    pub(super) fn detail(&self) -> String {
+        let mut detail = format!(
+            "{} · {} turns · {} out",
+            self.status_label(),
+            self.turns,
+            self.output_tokens
+        );
+        if self.origin == AgentOrigin::TeamMember {
+            detail.push_str(&format!(" · ↑{} ↓{}", self.messages_sent, self.messages_received));
+        }
+        detail
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ApprovalRequest {
     pub(super) call_id: String,
@@ -69,9 +143,14 @@ pub(super) struct AppState {
     /// Latest task checklist published by the agent. Whole-list replacement,
     /// mirroring the tool's own semantics.
     pub(super) todos: Vec<TodoSnapshot>,
+    /// Sub-agents and team members seen this session, in the order they
+    /// appeared. Kept after they finish so the panel and the transcript agree.
+    pub(super) agents: Vec<AgentRow>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
     active_tools: HashMap<String, usize>,
+    /// Agent id (or team `name@team`) to its index in `agents`.
+    agent_index: HashMap<String, usize>,
     protocol_results: HashSet<String>,
 }
 
@@ -109,9 +188,11 @@ impl AppState {
             usage: TokenUsage::default(),
             turns: 0,
             todos: Vec::new(),
+            agents: Vec::new(),
             active_assistant: None,
             active_thinking: None,
             active_tools: HashMap::new(),
+            agent_index: HashMap::new(),
             protocol_results: HashSet::new(),
         }
     }
@@ -130,6 +211,7 @@ impl AppState {
         self.show_welcome = messages.is_empty();
         self.close_active_blocks();
         self.active_tools.clear();
+        self.clear_agents();
     }
 
     pub(super) fn begin_initialization(&mut self) {
@@ -158,7 +240,13 @@ impl AppState {
         self.popup.update("");
         self.session_picker.close();
         self.active_tools.clear();
+        self.clear_agents();
         self.protocol_results.clear();
+    }
+
+    fn clear_agents(&mut self) {
+        self.agents.clear();
+        self.agent_index.clear();
     }
 
     pub(super) fn pending_transcript(&self) -> &[TranscriptEntry] {
@@ -331,42 +419,156 @@ impl AppState {
             AgentEvent::TodoUpdated(todos) => self.todos = todos,
             AgentEvent::SubAgentStarted { id, name, depth } => {
                 self.close_active_blocks();
-                self.transcript.push(TranscriptEntry::new(
-                    EntryKind::Info,
-                    "Sub-agent",
-                    format!(
-                        "{name} started ({}..., depth {depth})",
-                        id.chars().take(8).collect::<String>()
-                    ),
-                ));
+                let label = format!("{name} (depth {depth})");
+                self.open_agent_row(id, label, AgentOrigin::OneShot, SubAgentEventStatus::Running);
             }
             AgentEvent::SubAgentProgress {
                 id,
                 status,
                 turns,
                 output_tokens,
-            } => self.transcript.push(TranscriptEntry::new(
-                EntryKind::Info,
-                "Sub-agent",
-                format!(
-                    "{}...: {status:?}, {turns} turns, {output_tokens} output tokens",
-                    id.chars().take(8).collect::<String>()
-                ),
-            )),
+            } => self.update_agent_row(&id, status, turns, output_tokens),
             AgentEvent::SubAgentFinished {
                 id,
                 status,
                 turns,
                 output_tokens,
-            } => self.transcript.push(TranscriptEntry::new(
-                EntryKind::Info,
-                "Sub-agent",
-                format!(
-                    "{}... finished: {status:?}, {turns} turns, {output_tokens} output tokens",
-                    id.chars().take(8).collect::<String>()
-                ),
-            )),
+            } => {
+                self.update_agent_row(&id, status, turns, output_tokens);
+                self.finish_agent_row(&id);
+            }
+            AgentEvent::TeamMemberJoined { team, member, agent_id } => {
+                self.close_active_blocks();
+                let label = format!("{member} ({team})");
+                // A teammate starts parked on its inbox rather than working,
+                // which is what `idle` says and `running` would not.
+                self.open_agent_row(agent_id, label, AgentOrigin::TeamMember, SubAgentEventStatus::Idle);
+            }
+            AgentEvent::TeamMemberExited { agent_id } => {
+                if let Some(index) = self.agent_row_index(&agent_id) {
+                    self.agents[index].status = SubAgentEventStatus::Finished;
+                    self.refresh_agent_entry(index);
+                }
+                self.finish_agent_row(&agent_id);
+            }
+            AgentEvent::TeamMessageSent { from, to } => self.record_team_message(&from, &to),
         }
+    }
+
+    /// Agents that have not reached a terminal status yet.
+    pub(super) fn active_agents(&self) -> impl Iterator<Item = &AgentRow> {
+        self.agents.iter().filter(|row| row.is_active())
+    }
+
+    fn open_agent_row(&mut self, id: String, label: String, origin: AgentOrigin, status: SubAgentEventStatus) {
+        // A resumed id re-uses its row: continuing an agent is the same agent,
+        // and a second row would double-count it in the panel.
+        if let Some(index) = self.agent_index.get(&id).copied() {
+            self.agents[index].status = status;
+            self.refresh_agent_entry(index);
+            return;
+        }
+
+        let entry = self.transcript.len();
+        let row = AgentRow {
+            id: id.clone(),
+            name: label.clone(),
+            origin,
+            status,
+            turns: 0,
+            output_tokens: 0,
+            messages_sent: 0,
+            messages_received: 0,
+            entry,
+        };
+        let mut transcript_entry = TranscriptEntry::agent(label, row.detail());
+        transcript_entry.tool_status = Some(row.step_status());
+        self.transcript.push(transcript_entry);
+        self.agent_index.insert(id, self.agents.len());
+        self.agents.push(row);
+    }
+
+    fn update_agent_row(&mut self, id: &str, status: SubAgentEventStatus, turns: usize, output_tokens: u64) {
+        let Some(index) = self.agent_index.get(id).copied() else {
+            return;
+        };
+        let row = &mut self.agents[index];
+        row.status = status;
+        row.turns = turns;
+        row.output_tokens = output_tokens;
+        self.refresh_agent_entry(index);
+    }
+
+    fn finish_agent_row(&mut self, id: &str) {
+        let Some(index) = self.agent_index.get(id).copied() else {
+            return;
+        };
+        let entry = self.agents[index].entry;
+        if let Some(entry) = self.transcript.get_mut(entry) {
+            entry.finish();
+        }
+    }
+
+    /// Count one delivery against the sender and the recipients.
+    ///
+    /// Message bodies never reach the renderer, and a line per delivery would
+    /// scale with team size squared, so traffic is reported as counters on the
+    /// rows involved.
+    fn record_team_message(&mut self, from: &str, to: &str) {
+        let sender = self.team_row_index(from);
+        if let Some(index) = sender {
+            self.agents[index].messages_sent += 1;
+            self.refresh_agent_entry(index);
+        }
+
+        // A broadcast reaches every active teammate but the sender, matching
+        // how the runtime fans it out.
+        let recipients = if to == "*" {
+            self.agents
+                .iter()
+                .enumerate()
+                .filter(|(index, row)| {
+                    row.origin == AgentOrigin::TeamMember && row.is_active() && Some(*index) != sender
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        } else {
+            self.team_row_index(to).into_iter().collect()
+        };
+        for index in recipients {
+            self.agents[index].messages_received += 1;
+            self.refresh_agent_entry(index);
+        }
+    }
+
+    /// Resolve a team address to a row.
+    ///
+    /// Senders arrive as `name@team` and recipients as a bare `name`, so both
+    /// spellings have to land on the same row. The leader has no row of its own
+    /// and simply misses.
+    fn team_row_index(&self, address: &str) -> Option<usize> {
+        if let Some(index) = self.agent_index.get(address).copied() {
+            return Some(index);
+        }
+        let name = address.split_once('@').map_or(address, |(name, _)| name);
+        self.agents.iter().position(|row| {
+            row.origin == AgentOrigin::TeamMember
+                && row.id.split_once('@').is_some_and(|(row_name, _)| row_name == name)
+        })
+    }
+
+    fn refresh_agent_entry(&mut self, index: usize) {
+        let detail = self.agents[index].detail();
+        let status = self.agents[index].step_status();
+        let entry = self.agents[index].entry;
+        if let Some(entry) = self.transcript.get_mut(entry) {
+            entry.text = detail;
+            entry.tool_status = Some(status);
+        }
+    }
+
+    fn agent_row_index(&self, id: &str) -> Option<usize> {
+        self.agent_index.get(id).copied()
     }
 
     /// The entry the agent is working on right now, if exactly the one.

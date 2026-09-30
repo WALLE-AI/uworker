@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{clear, compact, context, help, memory, quit};
+use super::{agents, clear, compact, context, help, memory, quit, teams};
 use crate::compact::state::CompactState;
 use crate::context_usage::{ContextState, PromptUsage};
 use crate::output::OutputSink;
+use crate::subagent::registry::SubAgentRegistry;
+use crate::team::InProcessTeamRuntime;
 use agentrs_config::compact::CompactConfig;
 use agentrs_providers::LlmProvider;
 use agentrs_types::message::Message;
@@ -47,6 +49,10 @@ pub struct CommandContext<'a> {
     pub(crate) context_tools: &'a [ToolDef],
     /// Memory directory for this session, or `None` when memory is disabled.
     pub(crate) memory_dir: Option<&'a Path>,
+    /// Live sub-agent registry, or `None` when sub-agents are disabled.
+    pub(crate) subagent_registry: Option<&'a Arc<SubAgentRegistry>>,
+    /// Team runtime this session leads, or `None` when Team mode is disabled.
+    pub(crate) team_runtime: Option<&'a Arc<InProcessTeamRuntime>>,
     pub(crate) dynamic_system_tokens: u64,
 }
 
@@ -114,6 +120,8 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(context::ContextCommand));
     registry.register(Box::new(clear::ClearCommand));
     registry.register(Box::new(memory::MemoryCommand));
+    registry.register(Box::new(agents::AgentsCommand));
+    registry.register(Box::new(teams::TeamsCommand));
     registry.register(Box::new(help::HelpCommand));
     registry.register(Box::new(quit::QuitCommand));
     registry

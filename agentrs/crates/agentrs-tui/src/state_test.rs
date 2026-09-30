@@ -491,34 +491,177 @@ fn a_new_session_starts_without_a_checklist() {
     assert!(state.todos.is_empty(), "a fresh session must not inherit the old plan");
 }
 
+fn subagent_started(state: &mut AppState, id: &str, name: &str) {
+    state.handle_agent_event(AgentEvent::SubAgentStarted {
+        id: id.to_string(),
+        name: name.to_string(),
+        depth: 1,
+    });
+}
+
+fn member_joined(state: &mut AppState, member: &str) {
+    state.handle_agent_event(AgentEvent::TeamMemberJoined {
+        team: "core".to_string(),
+        member: member.to_string(),
+        agent_id: format!("{member}@core"),
+    });
+}
+
 #[test]
-fn subagent_lifecycle_is_visible_with_depth_turns_and_tokens() {
+fn a_subagent_keeps_one_entry_that_the_lifecycle_updates_in_place() {
     let mut state = state();
     state.handle_agent_event(AgentEvent::SubAgentStarted {
         id: "0199abcdef012345".into(),
         name: "explore-api".into(),
         depth: 2,
     });
+    assert_eq!(state.transcript.len(), 1);
+    assert_eq!(state.transcript[0].kind, EntryKind::Agent);
+    assert_eq!(state.transcript[0].label, "explore-api (depth 2)");
+
     state.handle_agent_event(AgentEvent::SubAgentProgress {
         id: "0199abcdef012345".into(),
         status: SubAgentEventStatus::Running,
         turns: 3,
         output_tokens: 144,
     });
+    assert_eq!(state.transcript.len(), 1, "progress must not append a second line");
+    assert_eq!(state.transcript[0].text, "running · 3 turns · 144 out");
+
     state.handle_agent_event(AgentEvent::SubAgentFinished {
         id: "0199abcdef012345".into(),
         status: SubAgentEventStatus::Finished,
         turns: 4,
         output_tokens: 233,
     });
+    assert_eq!(state.transcript.len(), 1);
+    assert_eq!(state.transcript[0].text, "done · 4 turns · 233 out");
+    assert_eq!(state.agents.len(), 1);
+    assert!(!state.agents[0].is_active());
+}
 
-    let rendered = state
-        .transcript
-        .iter()
-        .map(|entry| entry.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("explore-api started (0199abcd..., depth 2)"));
-    assert!(rendered.contains("Running, 3 turns, 144 output tokens"));
-    assert!(rendered.contains("Finished, 4 turns, 233 output tokens"));
+#[test]
+fn an_unfinished_agent_is_held_back_from_scrollback() {
+    let mut state = state();
+    subagent_started(&mut state, "child-1", "explore");
+    assert!(
+        !state.transcript[0].is_stable_for_history(),
+        "a running agent's row still changes, so it cannot be flushed"
+    );
+
+    state.handle_agent_event(AgentEvent::SubAgentFinished {
+        id: "child-1".into(),
+        status: SubAgentEventStatus::Failed,
+        turns: 1,
+        output_tokens: 5,
+    });
+    assert!(state.transcript[0].is_stable_for_history());
+    assert_eq!(state.transcript[0].tool_status, Some(ToolStepStatus::Error));
+}
+
+#[test]
+fn resuming_a_subagent_id_reuses_its_row() {
+    let mut state = state();
+    subagent_started(&mut state, "child-1", "explore");
+    state.handle_agent_event(AgentEvent::SubAgentProgress {
+        id: "child-1".into(),
+        status: SubAgentEventStatus::Running,
+        turns: 2,
+        output_tokens: 20,
+    });
+    subagent_started(&mut state, "child-1", "explore");
+
+    assert_eq!(state.agents.len(), 1, "a resumed agent is the same agent");
+    assert_eq!(state.transcript.len(), 1);
+}
+
+#[test]
+fn a_team_member_is_idle_when_it_joins_and_done_when_it_exits() {
+    let mut state = state();
+    member_joined(&mut state, "reviewer");
+    assert_eq!(state.transcript.len(), 1);
+    assert_eq!(state.transcript[0].label, "reviewer (core)");
+    assert_eq!(state.transcript[0].text, "idle · 0 turns · 0 out · ↑0 ↓0");
+    assert_eq!(state.active_agents().count(), 1);
+
+    state.handle_agent_event(AgentEvent::TeamMemberExited {
+        agent_id: "reviewer@core".into(),
+    });
+    assert_eq!(state.transcript.len(), 1);
+    assert!(state.transcript[0].text.starts_with("done"));
+    assert_eq!(state.active_agents().count(), 0);
+    assert!(state.transcript[0].is_stable_for_history());
+}
+
+#[test]
+fn a_delivered_message_moves_counters_rather_than_adding_lines() {
+    let mut state = state();
+    member_joined(&mut state, "alice");
+    member_joined(&mut state, "bob");
+
+    // The sender arrives as `name@team` and the recipient as a bare name; both
+    // spellings have to land on the same rows.
+    state.handle_agent_event(AgentEvent::TeamMessageSent {
+        from: "alice@core".into(),
+        to: "bob".into(),
+    });
+
+    assert_eq!(state.transcript.len(), 2, "traffic must not grow the transcript");
+    assert_eq!(state.agents[0].messages_sent, 1);
+    assert_eq!(state.agents[0].messages_received, 0);
+    assert_eq!(state.agents[1].messages_received, 1);
+    assert!(state.transcript[1].text.contains("↓1"));
+}
+
+#[test]
+fn a_broadcast_credits_every_active_member_except_the_sender() {
+    let mut state = state();
+    member_joined(&mut state, "alice");
+    member_joined(&mut state, "bob");
+    member_joined(&mut state, "carol");
+    state.handle_agent_event(AgentEvent::TeamMemberExited {
+        agent_id: "carol@core".into(),
+    });
+
+    state.handle_agent_event(AgentEvent::TeamMessageSent {
+        from: "alice@core".into(),
+        to: "*".into(),
+    });
+
+    assert_eq!(state.agents[0].messages_sent, 1);
+    assert_eq!(state.agents[0].messages_received, 0, "a broadcast excludes its sender");
+    assert_eq!(state.agents[1].messages_received, 1);
+    assert_eq!(
+        state.agents[2].messages_received, 0,
+        "a stopped member receives nothing"
+    );
+}
+
+#[test]
+fn a_message_from_the_leader_is_counted_only_for_the_recipient() {
+    let mut state = state();
+    member_joined(&mut state, "alice");
+    state.handle_agent_event(AgentEvent::TeamMessageSent {
+        from: "team-lead@core".into(),
+        to: "alice".into(),
+    });
+
+    assert_eq!(state.agents.len(), 1, "the leader has no row of its own");
+    assert_eq!(state.agents[0].messages_received, 1);
+    assert_eq!(state.agents[0].messages_sent, 0);
+}
+
+#[test]
+fn a_new_session_forgets_the_agents_of_the_old_one() {
+    let mut state = state();
+    subagent_started(&mut state, "child-1", "explore");
+    member_joined(&mut state, "reviewer");
+    state.reset_session("model".to_string(), "provider".to_string(), None, &[]);
+
+    assert!(state.agents.is_empty());
+    assert_eq!(state.active_agents().count(), 0);
+    // A stale index would point into the new session's transcript.
+    subagent_started(&mut state, "child-1", "explore");
+    assert_eq!(state.agents.len(), 1);
+    assert_eq!(state.transcript.len(), 1);
 }

@@ -108,6 +108,8 @@ struct AgentToolRuntime {
     registry: Arc<crate::subagent::registry::SubAgentRegistry>,
     parent_session: Arc<RwLock<Option<String>>>,
     team_inbox: Option<Arc<TeammateInbox>>,
+    /// Kept so the engine can expose the team's membership to `/teams`.
+    team_runtime: Option<Arc<InProcessTeamRuntime>>,
     /// Shared with the engine so background memory extraction can fork a
     /// restricted child of this same runtime.
     spawner: Arc<AgentSpawner>,
@@ -236,6 +238,9 @@ impl AgentBootstrap {
         }
         if let Some(inbox) = subagent_registry.team_inbox {
             engine.set_team_inbox(inbox);
+        }
+        if let Some(runtime) = subagent_registry.team_runtime {
+            engine.set_team_runtime(runtime);
         }
 
         Ok(BootstrapResult {
@@ -482,7 +487,8 @@ impl AgentBootstrap {
         AgentToolRuntime {
             registry: spawner.registry(),
             parent_session: spawner.parent_session_slot(),
-            team_inbox: team_runtime.map(|runtime| runtime.leader_inbox()),
+            team_inbox: team_runtime.as_ref().map(|runtime| runtime.leader_inbox()),
+            team_runtime,
             spawner,
         }
     }

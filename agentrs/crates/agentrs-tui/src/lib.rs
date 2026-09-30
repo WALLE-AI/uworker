@@ -1,3 +1,4 @@
+mod agent_panel;
 mod app;
 mod app_command;
 mod command_popup;
@@ -8,6 +9,7 @@ mod session_picker;
 mod state;
 mod terminal;
 mod terminal_event_reader;
+mod todo_panel;
 mod transcript;
 mod ui;
 

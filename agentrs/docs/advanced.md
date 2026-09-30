@@ -480,6 +480,22 @@ Pass a previous child ID as `task_id` to continue its persisted conversation. Ch
 
 Set `isolation` to `worktree` for a detached Git worktree. A clean worktree is removed automatically. A worktree containing changes is preserved and its path is appended to the child result. Resuming an existing child while requesting a new worktree is rejected.
 
+### Watching And Cancelling
+
+Each child gets one transcript row that its lifecycle events update in place —
+status, turns, and output tokens — and consecutive rows collapse under an
+`• Agents` header. While any child is still running, a panel above the checklist
+lists the live ones and hides itself again once they all finish.
+
+`/agents` lists the registered children as `<id> <name> <status> <elapsed>`,
+marking persistent team members. One-shot children are awaited inside the turn
+that spawned them, so between turns the listing normally shows only persistent
+members; the transcript block is the record for the rest.
+
+`/agents cancel <id>` accepts an id prefix and cancels that child. Cancelling a
+persistent team member is allowed and reported as forced — the graceful stop is
+a `shutdown_request` from the leader followed by `TeamDelete`.
+
 ---
 
 ## Agent Teams
@@ -512,6 +528,17 @@ members and performs best-effort storage cleanup.
 
 Persistent team members currently require `isolation = "shared"`; ordinary
 one-shot sub-agents retain worktree isolation support.
+
+### Watching A Team
+
+Member joins and exits land in the transcript as agent rows alongside one-shot
+children, and each row carries its message counters as `↑sent ↓received`.
+Message bodies are never rendered: the lifecycle events carry routing only, so
+a broadcast is counted against every active member but the sender.
+
+`/teams` shows the active team, its leader, and each member with its type,
+whether it is still active, and its inbox depth against capacity — a queue that
+is not draining is what distinguishes a stalled member from an idle one.
 
 ---
 

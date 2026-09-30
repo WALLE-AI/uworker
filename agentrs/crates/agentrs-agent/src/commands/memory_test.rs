@@ -101,6 +101,8 @@ mod tests {
                 prompt_usage: &self.prompt_usage,
                 context_tools: &self.context_tools,
                 memory_dir: self.memory_dir.as_deref(),
+                subagent_registry: None,
+                team_runtime: None,
                 dynamic_system_tokens: 0,
             };
             MemoryCommand.execute(&mut ctx, args).await.unwrap()

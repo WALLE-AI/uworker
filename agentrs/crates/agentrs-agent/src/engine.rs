@@ -31,7 +31,7 @@ use crate::plan::state::PlanState;
 use crate::session::{Session, SessionManager};
 use crate::stream::StreamOutcome;
 use crate::subagent::registry::SubAgentRegistry;
-use crate::team::{TeammateInbox, render_teammate_messages};
+use crate::team::{InProcessTeamRuntime, TeammateInbox, render_teammate_messages};
 use crate::todo_reminder::TodoRuntime;
 use crate::tool_call::{
     DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, PolicyDenial, ToolCallFailureFingerprint,
@@ -151,6 +151,9 @@ pub struct AgentEngine {
     subagent_parent_id: Option<Arc<RwLock<Option<String>>>>,
     /// Actor-bound Team inbox drained only at valid conversation boundaries.
     team_inbox: Option<Arc<TeammateInbox>>,
+    /// Team runtime this session leads, when Team mode is enabled. Held for the
+    /// read-only control surface; membership itself is driven by the tools.
+    team_runtime: Option<Arc<InProcessTeamRuntime>>,
 
     // Session persistence.
     /// Optional session manager used when persistence is enabled.
@@ -299,6 +302,7 @@ impl AgentEngine {
             subagent_registry: None,
             subagent_parent_id: None,
             team_inbox: None,
+            team_runtime: None,
             session_manager,
             current_session: None,
             memory_dir: None,
@@ -419,6 +423,7 @@ impl AgentEngine {
             subagent_registry: None,
             subagent_parent_id: None,
             team_inbox: None,
+            team_runtime: None,
             session_manager,
             current_session: Some(session),
             memory_dir: None,
@@ -1860,6 +1865,8 @@ impl AgentEngine {
             prompt_usage: &self.prompt_usage,
             context_tools: &context_tools,
             memory_dir: self.memory_dir.as_deref(),
+            subagent_registry: self.subagent_registry.as_ref(),
+            team_runtime: self.team_runtime.as_ref(),
             dynamic_system_tokens,
         };
 
@@ -1965,6 +1972,10 @@ impl AgentEngine {
 
     pub(crate) fn set_team_inbox(&mut self, inbox: Arc<TeammateInbox>) {
         self.team_inbox = Some(inbox);
+    }
+
+    pub(crate) fn set_team_runtime(&mut self, runtime: Arc<InProcessTeamRuntime>) {
+        self.team_runtime = Some(runtime);
     }
 
     fn append_team_messages_to(&self, blocks: &mut Vec<ContentBlock>) {

@@ -57,7 +57,9 @@ and output use a responsive one-line preview instead of occupying the
 conversation viewport.
 
 TUI-owned commands include `/status`, `/model`, `/permissions`, `/new`,
-`/resume`, `/mcp`, and `/skills`. Running `/resume` without an ID opens a
+`/resume`, `/mcp`, and `/skills`; `/agents` and `/teams` report sub-agent and
+Team activity, and a panel above the composer lists whichever sub-agents or team
+members are still running. Running `/resume` without an ID opens a
 full-screen, mouse- and keyboard-navigable picker containing every saved session
 up to the configured `session.max_sessions` retention limit. Session switches
 rebuild the agent runtime without exiting the interactive UI. A fresh TUI does

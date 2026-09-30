@@ -10,6 +10,8 @@
 * **tools:** support shared tool instances with per-engine tool contexts and read-only command enforcement
 * **agent:** add persistent named teams with bounded mailboxes, structured shutdown, and lifecycle events
 * **tools:** add TeamCreate, TeamDelete, and SendMessage coordination tools
+* **tui:** collapse sub-agent and team lifecycle into in-place rows with a live agent panel
+* **commands:** add /agents and /teams for listing sub-agents, cancelling one, and inspecting team inboxes
 
 ### Documentation
 

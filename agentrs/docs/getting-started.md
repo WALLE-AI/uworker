@@ -316,8 +316,8 @@ Mouse capture is deliberately disabled. Drag across any visible conversation
 text and use the terminal's normal copy shortcut (`Cmd+C` on macOS or usually
 `Ctrl+Shift+C` on Linux/Windows terminals).
 
-Agent commands are `/compact`, `/context`, `/clear`, `/memory`, `/help`, and
-`/quit`. `/memory` takes subcommands:
+Agent commands are `/compact`, `/context`, `/clear`, `/memory`, `/agents`,
+`/teams`, `/help`, and `/quit`. `/memory` takes subcommands:
 
 | Command | Description |
 |---------|-------------|
@@ -325,6 +325,14 @@ Agent commands are `/compact`, `/context`, `/clear`, `/memory`, `/help`, and
 | `/memory show <file>` | Print one memory in full |
 | `/memory rm <file>` | Delete a memory and its `MEMORY.md` index entry |
 | `/memory path` | Print the memory directory |
+
+`/agents` and `/teams` report sub-agent and Team activity:
+
+| Command | Description |
+|---------|-------------|
+| `/agents` | List registered sub-agents with status, age, and whether they are persistent |
+| `/agents cancel <id>` | Cancel one sub-agent by id prefix; forced for a persistent member |
+| `/teams` | Show the active team, its leader, and each member with its inbox depth |
 
 The interactive UI also provides:
 

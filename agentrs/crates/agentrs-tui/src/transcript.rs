@@ -10,6 +10,8 @@ pub(super) enum EntryKind {
     Assistant,
     Thinking,
     Tool,
+    /// One sub-agent or team member, updated in place for its whole life.
+    Agent,
     Info,
     Error,
 }
@@ -87,6 +89,14 @@ impl TranscriptEntry {
         }
     }
 
+    /// One agent's row. The clock starts right away: an agent is live from the
+    /// moment it is announced, unlike a text block that opens on first chunk.
+    pub(super) fn agent(label: impl Into<String>, text: impl Into<String>) -> Self {
+        let mut entry = Self::new(EntryKind::Agent, label, text);
+        entry.start_clock();
+        entry
+    }
+
     /// Start the stream clock. Called when a live block is opened, so a
     /// finished block can report how long the model spent on it.
     pub(super) fn start_clock(&mut self) {
@@ -143,7 +153,14 @@ impl TranscriptEntry {
     }
 
     pub(super) fn is_stable_for_history(&self) -> bool {
-        self.kind != EntryKind::Tool || self.tool_status.is_some_and(ToolStepStatus::is_terminal)
+        match self.kind {
+            // Both kinds keep mutating after they are pushed, so neither may
+            // reach scrollback before it settles: a tool step until its status
+            // is terminal, an agent until its own lifecycle ends.
+            EntryKind::Tool => self.tool_status.is_some_and(ToolStepStatus::is_terminal),
+            EntryKind::Agent => self.is_finished(),
+            _ => true,
+        }
     }
 }
 

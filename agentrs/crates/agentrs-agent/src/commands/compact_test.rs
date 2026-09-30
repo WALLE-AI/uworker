@@ -97,6 +97,8 @@ mod tests {
             prompt_usage: &prompt_usage,
             context_tools: &context_tools,
             memory_dir: None,
+            subagent_registry: None,
+            team_runtime: None,
             dynamic_system_tokens: 0,
         };
 
@@ -142,6 +144,8 @@ mod tests {
             prompt_usage: &prompt_usage,
             context_tools: &context_tools,
             memory_dir: None,
+            subagent_registry: None,
+            team_runtime: None,
             dynamic_system_tokens: 0,
         };
 
@@ -188,6 +192,8 @@ mod tests {
             prompt_usage: &prompt_usage,
             context_tools: &context_tools,
             memory_dir: None,
+            subagent_registry: None,
+            team_runtime: None,
             dynamic_system_tokens: 0,
         };
 
@@ -235,6 +241,8 @@ mod tests {
             prompt_usage: &prompt_usage,
             context_tools: &context_tools,
             memory_dir: None,
+            subagent_registry: None,
+            team_runtime: None,
             dynamic_system_tokens: 0,
         };
 

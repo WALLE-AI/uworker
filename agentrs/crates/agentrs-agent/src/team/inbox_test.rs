@@ -36,3 +36,24 @@ fn bounded_inbox_reports_backpressure_and_close() {
     inbox.close();
     assert!(matches!(inbox.push(message("third")), Err(InboxPushError::Closed)));
 }
+
+#[test]
+fn depth_tracks_queued_messages_and_capacity_reports_the_bound() {
+    let inbox = TeammateInbox::new(3);
+    assert_eq!(inbox.capacity(), 3);
+    assert_eq!(inbox.depth(), 0);
+
+    inbox.push(message("first")).unwrap();
+    inbox.push(message("second")).unwrap();
+    assert_eq!(inbox.depth(), 2);
+
+    assert_eq!(inbox.drain().len(), 2);
+    assert_eq!(inbox.depth(), 0);
+}
+
+/// A capacity of zero would make every push fail, so the constructor floors it
+/// at one and `capacity()` must report the floored value, not the request.
+#[test]
+fn capacity_reports_the_floored_bound() {
+    assert_eq!(TeammateInbox::new(0).capacity(), 1);
+}

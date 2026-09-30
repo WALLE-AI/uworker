@@ -9,12 +9,14 @@ use tokio::sync::Semaphore;
 use super::handle::SubAgentHandle;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Read by addressable control surfaces added after the runtime core.
 pub(crate) struct SubAgentSnapshot {
     pub(crate) id: SubAgentId,
     pub(crate) name: String,
     pub(crate) status: SubAgentStatus,
     pub(crate) started_at: Instant,
+    /// Persistent members outlive the turn that spawned them, and their
+    /// graceful stop is a leader-driven shutdown rather than a cancel.
+    pub(crate) persistent: bool,
 }
 
 pub(crate) struct SubAgentRegistry {
@@ -48,7 +50,6 @@ impl SubAgentRegistry {
             .insert(id, Arc::new(handle));
     }
 
-    #[allow(dead_code)] // Addressable query API used by the upcoming control tools.
     pub(crate) fn get(&self, id: &SubAgentId) -> Option<SubAgentSnapshot> {
         self.handles
             .read()
@@ -57,7 +58,6 @@ impl SubAgentRegistry {
             .map(|handle| handle.snapshot())
     }
 
-    #[allow(dead_code)] // Addressable query API used by the upcoming control tools.
     pub(crate) fn list(&self) -> Vec<SubAgentSnapshot> {
         self.handles
             .read()
@@ -67,7 +67,6 @@ impl SubAgentRegistry {
             .collect()
     }
 
-    #[allow(dead_code)] // Addressable cancellation API used by the upcoming control tools.
     pub(crate) fn cancel(&self, id: &SubAgentId) -> bool {
         let handle = self
             .handles
