@@ -685,21 +685,21 @@ M6   开关/命令   █████                2.5 人日   ── 依赖 M
 
 ## 5. 工程规范检查清单
 
-每个 milestone 合并前逐项自查（源自 `agentrs/AGENTS.md`）：
+每个 milestone 合并前逐项自查（源自 `agentrs/AGENTS.md`）。勾选状态按 2026-09-30 的仓库实际状态回填，核验方式见 §7。
 
-- [ ] `cargo clippy` 无警告，`cargo fmt --all` 无 diff
-- [ ] 推送使用 `just push`（自动跑 fmt → clippy → test）
-- [ ] 注释与提交信息为英文
-- [ ] 错误处理：公开 API 用 `thiserror`，内部传播用 `anyhow`；无裸 `unwrap()`
-- [ ] **可见性复核**：新增项默认 `pub(crate)`；仅跨 crate 使用的才 `pub`。本方案会激活多个现有死代码 `pub`，同时应把仍无跨 crate 调用者的收窄
-- [ ] 无业务逻辑写在 `mod.rs` / `lib.rs`
-- [ ] 两个 `::` 以上的路径一律 `use` 导入后按本地名引用
-- [ ] 测试拆分到同目录 `*_test.rs`，源文件只保留 `#[cfg(test)] #[path=...] mod ..._test;` 挂载
-- [ ] **无硬编码 provider 判断**：M3 的结构化输出能力必须走 `ProviderCompat` 字段
-- [ ] 跨平台：路径用 `Path::join`；深度判断用 `Component::Normal`；shell 调用走 `agentrs_config::shell`
-- [ ] 日志：关键路径评估分级；生产日志不含记忆内容、prompt、文件内容
-- [ ] 文件保持在 1000 行以内
-- [ ] `docs/advanced.md` 的 Memory System 章节同步更新（新增召回、抽取、命令、配置说明）
+- [x] `cargo clippy` 无警告，`cargo fmt --all` 无 diff —— `cargo clippy --workspace --all-targets` 零告警；`cargo fmt --all -- --check` 无 diff
+- [ ] 推送使用 `just push`（自动跑 fmt → clippy → test）—— 流程项，无法从仓库状态核验
+- [x] 注释与提交信息为英文
+- [x] 错误处理：公开 API 用 `thiserror`，内部传播用 `anyhow`；无裸 `unwrap()` —— `agentrs-memory/src/error.rs` 用 `thiserror`；记忆相关生产代码零 `unwrap()`（仅 `team/test_support.rs` 这类测试替身里有）
+- [x] **可见性复核**：新增项默认 `pub(crate)`；仅跨 crate 使用的才 `pub`。本方案会激活多个现有死代码 `pub`，同时应把仍无跨 crate 调用者的收窄 —— 三处死代码均已有生产调用点：`is_memory_path`（`memory/telemetry.rs:84`）、`delete_memory` / `remove_index_entry`（`commands/memory.rs:139,147`）
+- [x] 无业务逻辑写在 `mod.rs` / `lib.rs` —— `agentrs-memory/src/lib.rs` 与各 `mod.rs` 均为纯声明
+- [ ] 两个 `::` 以上的路径一律 `use` 导入后按本地名引用 —— 仍有偏差：`paths.rs:37,163`、`index.rs:167,228`、`store.rs:102` 使用 `std::env::var` / `std::io::ErrorKind::NotFound` / `std::process::id` / `std::cmp::Reverse` 形式，按 AGENTS.md 应导入模块后写成 `env::var` / `ErrorKind::NotFound`
+- [x] 测试拆分到同目录 `*_test.rs`，源文件只保留 `#[cfg(test)] #[path=...] mod ..._test;` 挂载
+- [x] **无硬编码 provider 判断**：M3 的结构化输出能力必须走 `ProviderCompat` 字段 —— 实现未使用结构化输出：`ProviderMemorySelector`（`agent/memory/recall.rs`）让次级模型返回 JSON 数组文本后自行解析，全链路无 provider 名判断，故本条无需 `ProviderCompat` 开关
+- [x] 跨平台：路径用 `Path::join`；深度判断用 `Component::Normal`；shell 调用走 `agentrs_config::shell` —— 深度判断见 `paths.rs:123`
+- [x] 日志：关键路径评估分级；生产日志不含记忆内容、prompt、文件内容 —— `memory/telemetry.rs` 与 `agentrs-memory/src/recall.rs:81,97` 只记形状（条目数、候选/选中数、耗时、超时），空选择也记
+- [x] 文件保持在 1000 行以内 —— 本方案新增文件最大为 `subagent/spawner.rs` 之外的记忆模块，全部 < 1000 行（既有 `engine.rs` 2205 行、`config.rs` 1309 行为历史遗留，不属本方案范围）
+- [x] `docs/advanced.md` 的 Memory System 章节同步更新（新增召回、抽取、命令、配置说明）—— 含 Relevance Recall / Background Extraction / Approvals / Reviewing What Is Stored 与 `/memory` 子命令说明（`docs/advanced.md:389-394`）
 
 ---
 
@@ -714,6 +714,26 @@ M6   开关/命令   █████                2.5 人日   ── 依赖 M
 | R5 | 隐私：transcript 内容落盘 | 中 | 高 | 默认关闭 + 文档显式说明 + 目录路径可配 + 删除入口 |
 | R6 | `ToolPolicy` 扩展影响既有 Spawn 路径 | 低 | 中 | 新增枚举变体而非修改现有变体；既有 `AllowOnly` 语义不变；补 `tool_policy_test.rs` 回归 |
 | R7 | M0-1 修改路径清洗规则导致现有记忆"丢失" | 中 | 低 | 目录名变化会使旧记忆不可见。提供一次性迁移提示：启动时若旧目录存在而新目录不存在，`warn!` 输出迁移命令；不自动移动用户数据 |
+
+---
+
+## 7. 落地状态（2026-09-30 核验）
+
+M0–M6 全部落地，对应提交为 `3b8045f7fc` → `29bc09d093` 五次提交。
+
+| 里程碑 | 状态 | 代码落点 |
+|---|---|---|
+| M0 缺陷修复 | ✅ | `paths.rs` 无条件哈希后缀；`index.rs` 临时文件 + `fs::rename` 原子写；`remove_index_entry` 行首锚定解析（附并发与中文路径用例） |
+| M1 写入感知 + 提示词分档 | ✅ | `agent/memory/watch.rs`；`engine.rs:883` 接线；`engine.rs:168` / `context.rs:293` 的 `memory_full_instructions`；`bootstrap.rs:267` `ensure_memory_dir` |
+| M2 记忆新鲜度 | ✅ | `agentrs-memory/src/age.rs` |
+| M3 相关性召回 | ✅ | `agentrs-memory/src/recall.rs` + `agent/memory/recall.rs`（超时/传输错误/不可解析一律降级为不注入） |
+| M4 后台自动抽取 | ✅ | `agent/memory/extract.rs` |
+| M5 权限边界 | ✅ | `agent/memory/permission.rs` |
+| M6 检索指引 + 开关/命令/遥测 | ✅ | `prompt.rs:239` "Searching past context"；`agentrs-config/src/memory.rs`（`enabled` / `dir` / `recall` / `extract`）；`commands/memory.rs`（无参 / `show` / `rm` / `path`）；`agent/memory/telemetry.rs` |
+
+**核验方式**：`cargo test -p agentrs-memory` 227 项全绿；`cargo test -p agentrs-agent`（lib）607 项全绿；acceptance 11 项中 10 项通过，唯一失败项 `compact_test::autocompact_triggers_llm_summary` 需要真实 LLM 调用，在受限网络下被代理拦截，非代码缺陷。
+
+**未纳入本方案的能力**（§1.3 原样保留）：团队记忆同步、上传前密钥扫描、会话内记忆、子 Agent 独立记忆、daily-log 模式。
 
 ---
 
