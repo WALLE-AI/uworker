@@ -586,3 +586,23 @@
 ### 11.3 建议的校准点
 
 **阶段 1 结束时做一次费率校准**：用 T1.1–T1.6 的真实产出（实现行 / 测试行 / 实际人日）反推本团队费率与测试比，重算阶段 2–6。届时本文 §10 的全部数字应被替换——这与 `uworker-规模估算与排期校准报告.md` §3 的做法一致。
+
+---
+
+## 十二、落地状态（2026-09-30 核验）
+
+阶段 0～6 的 36 个 Task 全部落地，对应提交为 `1dd656a05b`（设计）、`7ece13f926`（Task 级子智能体）、`ab52df55a6`（持久 Team）。
+
+| 阶段 | 状态 | 代码落点 |
+|---|---|---|
+| 0 止血 | ✅ | fork skill 已接通：`agentrs-skills/src/executor.rs:78 execute_fork` 由 `agent/skill_tool.rs:164` 调用，无 spawner 时给出明确错误；`SpawnTool::describe` 已修正；`NO_PROXY` 说明见 `docs/troubleshooting.md:9` |
+| 1 取消传播与可寻址 | ✅ | `subagent/handle.rs`、`subagent/registry.rs`、`spawn_tool.rs` 接入注册表；父取消向下贯通 |
+| 2 上下文与用量 | ✅ | `subagent/context.rs`、`subagent/output.rs`；子用量计入父 run 总量但不抬高父上下文估算 |
+| 3 配置化预算 | ✅ | `[subagent]` 段：`max_per_call` / `max_concurrent` / `depth` / `max_turns` / `max_tokens` / `turn_output_budget` / `cancel_grace` |
+| 4 子会话与续跑 | ✅ | `session.rs:284 children()`、级联删除、root 列表过滤、`task_id` 续跑、`SubAgentStarted/Progress/Finished` 协议事件 |
+| 5 工具投影与隔离 | ✅ | `ToolRegistry` 持 `Arc<dyn Tool>` + 按 engine 的 tool context；`exec_command.rs:186 validate_read_only_command`（explore 只读策略）；`subagent/worktree.rs`（干净则自动清理，有改动则保留并回传路径） |
+| 6 Agent 定义与预制 | ✅ | `subagent/definitions.rs`：built-in → `~/.agentrs/agents` → `<workspace>/.agentrs/agents` 三级加载；内置 `general-purpose` / `explore` / `plan`；`hidden` 定义收编 summarizer 等内部调用；`prompt_section()` 把 `when-to-use` 注入父提示词 |
+
+**核验方式**：`cargo test -p agentrs-agent`（lib）607 项全绿；`cargo clippy --workspace --all-targets` 零告警。
+
+**可观测性（后续补齐）**：TUI 侧原先只把 `SubAgentStarted/Progress/Finished` 各刷一条 Info 行、且完全不显示 Team 事件，现已改为每个 agent 一条原地更新的 `• Agents` 转录行 + 运行中实时面板，并新增 `/agents`（列出 / 按 id 前缀取消，取消持久成员时警告）与 `/teams`（team、leader、成员收件箱深度）两个命令（`agentrs-agent/src/commands/{agents,teams}.rs`，CLI REPL 与 TUI 共用）。注意命令只在轮次之间执行，因此 `/agents` 通常只看得到持久成员，一次性子智能体看转录。

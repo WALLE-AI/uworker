@@ -522,22 +522,34 @@ agentrs-tools/src/team/send_tool.rs     // SendMessage
 
 **功能**（括号内为 §8 对应用例编号）
 
-- [ ] `WebFetch` 可抓取公网 HTTPS 页面并返回 Markdown；跨 host 重定向返回引导文本；二进制内容落盘并在结果中标注（TC-1.5-01/04/11）
-- [ ] `WebFetch` 拒绝 `http://127.0.0.1`、`http://169.254.169.254`、`http://localhost`、IPv6 环回及各私网段（TC-1.1-07~26）
-- [ ] `WebSearch` 在配置 Brave / Tavily / SearXNG 任一后端时返回结果，格式含结尾 REMINDER；后端为 `none` 时该工具不出现在 tool list 中（TC-2.1-08、TC-2.3-01/05）
+勾选状态按 2026-09-30 的仓库实际状态回填。
+
+- [x] `WebFetch` 可抓取公网 HTTPS 页面并返回 Markdown；跨 host 重定向返回引导文本；二进制内容落盘并在结果中标注（TC-1.5-01/04/11）—— `http_client_test.rs:99 reports_a_cross_host_redirect_instead_of_following_it`、`fetch_tool_test.rs:296 binary_content_is_saved_to_disk_and_noted_in_the_result`、`:574 saved_payloads_get_an_extension_the_model_can_reopen`；抓取路径由 wiremock 覆盖，未跑真实公网站点
+- [x] `WebFetch` 拒绝 `http://127.0.0.1`、`http://169.254.169.254`、`http://localhost`、IPv6 环回及各私网段（TC-1.1-07~26）—— `url_policy_test.rs` 50 个用例，覆盖环回 / link-local 元数据地址 / `localhost` / IPv6 `::1` / 10.x / 192.168.x，并覆盖跨 host 重定向与携带凭据的重定向目标
+- [x] `WebSearch` 在配置 Brave / Tavily / SearXNG 任一后端时返回结果，格式含结尾 REMINDER；后端为 `none` 时该工具不出现在 tool list 中（TC-2.1-08、TC-2.3-01/05）—— 四个后端均已实现（额外含 DuckDuckGo）；`bootstrap_test.rs:312 web_search_is_absent_when_no_backend_is_configured` 与 `:321 web_search_is_absent_when_its_api_key_is_missing`
 - [x] `TeamCreate` → `SendMessage` → teammate 在下一工具轮次收到 `<teammate-message>` → `TeamDelete` 全链路可跑通（TC-3.5-01）
 - [x] `TeamDelete` 在存在活跃成员时拒绝并列出成员名（TC-3.4-06）
-- [ ] §8 全部用例通过，覆盖率达 §8.6 门槛（`url_policy.rs` 分支覆盖 100%）
+- [ ] §8 全部用例通过，覆盖率达 §8.6 门槛（`url_policy.rs` 分支覆盖 100%）—— 用例部分已满足：`cargo test -p agentrs-tools` 全绿（lib 396 项 + 各集成目标）；覆盖率门槛未测量，需跑覆盖率工具后再勾
 
 **工程**
 
-- [ ] `cargo clippy` 零告警；`cargo fmt --all` 无 diff
-- [ ] 所有测试子模块位于同目录 `*_test.rs` 并以 `#[path]` 挂载
-- [ ] 业务逻辑不出现在 `lib.rs` / `mod.rs`
-- [ ] 单文件 < 1000 行
-- [ ] 新增 item 的可见性经过审查，优先 `pub(crate)`
-- [ ] Linux / macOS / Windows 三平台 CI 通过
-- [ ] `docs/tools.md`、`docs/advanced.md`、`THIRD-PARTY-NOTICES.md` 已更新
+- [x] `cargo clippy` 零告警；`cargo fmt --all` 无 diff —— `cargo clippy --workspace --all-targets` 零告警；`cargo fmt --all -- --check` 无 diff
+- [x] 所有测试子模块位于同目录 `*_test.rs` 并以 `#[path]` 挂载 —— `web/` 与 `team/` 下每个模块均配同名 `_test.rs`
+- [x] 业务逻辑不出现在 `lib.rs` / `mod.rs` —— `agentrs-tools/src/lib.rs` 19 行、各 `mod.rs` ≤ 19 行，均为纯声明
+- [x] 单文件 < 1000 行 —— 本方案新增文件最大 `web/fetch_tool_test.rs` 644 行（既有 `engine.rs` 2205 行、`config.rs` 1309 行为历史遗留，不属本方案范围）
+- [x] 新增 item 的可见性经过审查，优先 `pub(crate)`
+- [ ] Linux / macOS / Windows 三平台 CI 通过 —— 本地仅核验 Linux；macOS / Windows 需看 CI 结果
+- [ ] `docs/tools.md`、`docs/advanced.md`、`THIRD-PARTY-NOTICES.md` 已更新 —— 前两者已更新（`docs/tools.md` 含 WebFetch / WebSearch / Team 三件套章节，`docs/advanced.md` 含 Agent Teams 章节）；**`agentrs/THIRD-PARTY-NOTICES.md` 不存在**（仓库根目录 `uworker/THIRD-PARTY-NOTICES.md` 是另一个文件），Web 相关新依赖的许可声明仍缺
+
+**落地状态补充（2026-09-30）**
+
+Phase 0～3 全部落地：`agentrs-tools/src/web/`（url_policy / url_cache / html_to_md / http_client / fetch_tool / search_tool + Brave / Tavily / SearXNG / DuckDuckGo 四后端）、`agentrs-tools/src/team/`（create / delete / send）、`agentrs-agent/src/team/`（runtime / inbox / store）。Web 两件套已随 0.2.x 发布，Team 三件套在 Unreleased 段。
+
+已知限制（已写入 `docs/advanced.md`，非漏做）：
+
+1. 持久 team 成员仅支持 `isolation = "shared"`，不支持 worktree 隔离；worktree 仅对一次性子智能体可用
+
+原限制 2「`TeamEvent` 只到协议层、TUI 不可观测」**已解决**：`TuiSink::emit_team_event`（`agentrs-tui/src/event.rs`）把成员加入/退出/消息路由接入 TUI，成员与子智能体各占一条原地更新的 `• Agents` 转录行（消息只累加 `↑发 ↓收` 计数，不渲染正文），运行中另有实时面板；命令侧新增 `/agents`（列出、按 id 前缀取消，取消持久成员时警告优雅路径是 `shutdown_request` + `TeamDelete`）与 `/teams`（team、leader、成员的类型/存活/收件箱深度）。二者实现在 `agentrs-agent/src/commands/{agents,teams}.rs`，CLI REPL 与 TUI 共用。
 
 ---
 
